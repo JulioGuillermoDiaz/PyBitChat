@@ -1,0 +1,26 @@
+# Entorno de desarrollo de PyBitChat.
+
+# El venv se recrea con:  python -m venv .venv
+#                         .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv/
+
+# Bytecode de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Clon de un proyecto de terceros, de sólo lectura. No se versiona: es el
+# código fuente de otra persona y volver a publicarlo aquí no aporta nada.
+# Se recrea con:
+#     git clone https://github.com/vaibhav-mattoo/bitchat-tui reference/bitchat-tui
+#
+# Lo único que se conserva de esa fuente son los vectores ya extraidos, en
+# tests/fixtures/vectors.json, y se regeneran con tools/extract_vectors.py.
+reference/
+
+# Sistema operativo y editores
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,15 @@
+# Normaliza los finales de linea en el repositorio, para que el arbol de
+# trabajo en Windows no ensucie los diffs con cambios que no son cambios.
+* text=auto
+
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+
+# Los .log se guardan tal cual los emite la app, byte a byte.
+*.log -text
+
+# Binarios que no deben tocarse.
+*.png binary
+*.jpg binary

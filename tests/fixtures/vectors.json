@@ -1,0 +1,589 @@
+{
+  "_generated_by": "tools/extract_vectors.py",
+  "_source": "reference/bitchat-tui/*.log (commiteados en el repo upstream)",
+  "_note": "Los bytes son verdad. Los campos rust_* son anotaciones del cliente Rust y NO son autoritativos: sus parsers tienen bugs documentados.",
+  "vectors_per_file": {
+    "debug.log": 21,
+    "noise_debug.log": 0,
+    "noise_handler_debug.log": 0,
+    "noise_protocol_debug.log": 0,
+    "packet_debug.log": 0
+  },
+  "total": 21,
+  "vectors": [
+    {
+      "source_file": "debug.log",
+      "source_line": 2,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0101060000019866ea97ff010009234de4e300000000ffffffffffffffff616e6f6e796d6f7573df8389d451f6f97c225b4f81e6b3236c523979d5dbb5dbd59e4233a1a42bfa1cdffa54013113ca9d558665f7666b3fedbfbaf476820907127cafceb70317d18b830abdb8438a93101408ab5ddf83d8ff2d5c3c4c2b0c30a55d333e16fbecb784df30aa2f4a28cdc1ff36ded7543e1419e78368edfac6cd2ce97ee2dc971ceea55af78f9cad820862b990233f5fa0761a46ed5c3dbd1686033259279fd6bdfa5b8d8414df40c1393b0dfe6e10fae0f2239dbd83bce81fcde74f092d47f17e299c7f1fd5857048ac10bd9d362d4b8e2f6fba54e5a60f0917a4d9",
+      "_source_line_of_hex": 3,
+      "rust_parsed": {
+        "type": "Announce",
+        "sender_id": "234de4e300000000",
+        "recipient_id": "ffffffffffffffff"
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 7,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0104060000019866eab3ed01004c8b7f0cb466d3f967ffffffffffffffff100000019866eab3ed2434393436373042382d413543332d344234382d393234452d43423936443141323741463308616e6f6e36333238000268691038623766306362343636643366393637bd8646a2fd9faed45d83db545008ad2adc8865e90712739970862ef5f5f8a8b3c65cdfe856a9d792f9c22aaa8f07b0c6a979a9f96ca08e608cf46a3ccc3ef6efb9eefd3ed772cb98ec151b16cb41a600dadf95b03453eaf0c595c84e2a50d2eb794f17d5f2fb6ec38601e1cb2bc542f0dc0f1d020eef8c30c00db50a6dfb9409297c888f267102a3c8aabaab2459ef46dce846bcea96",
+      "_source_line_of_hex": 8,
+      "rust_parsed": {
+        "type": "Message",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "ffffffffffffffff"
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 12,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0125060000019866eadab60000328b7f0cb466d3f96763251ae690e7419197e898bb66fb3d308b7f0cb466d3f967234de4e300000000010000019866eadab608616e6f6e36333238adb638e1a0c430939af254afcdcdc6c2a9907ee6bf5073faff38f154a0bd4bfeb4c78e5e6a00384f8a79bcc258b0ec94ecf21fcfc69b7b9152414fe4f1e73542909724b7ec04d3ce5de26df3a2d093ffd83acb53d75dc4b77fddd9418674698945744d35e4201bd514a1e7a375d4836f5ff7f5f6acb036f930eea5618b3eb281f8b8456eca1a956a26a3b9b37b4363942df9d025b602099106a8b01016a7ba010259390439df0ddb6571ef2a6c24e211d1a5e98d25a4e2b8",
+      "_source_line_of_hex": 13,
+      "rust_parsed": {
+        "type": "HandshakeRequest",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": null
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 17,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0111060000019866eadb530100608b7f0cb466d3f967234de4e3000000002a3b7beec6e2c2720cd77dcddc657ddfc85231d84e21d9556900d209d0b1ee4b917edfbef7b1c0d4ef4e8da5aacd0a9ab9104abbec829ce93cd343ee6479afaa5b625b704d8c0977232bb09ebf3c431b3b525f37bfa1efaa967e8088379931b97465bc80405217be555df17ccd19258c1a8a7233e5cf6ee5b73885462d80bf33950fe8b48299bc2531ec366fbc8383b2513370b940c98b475bc52a752ac2a0e9bed2491e414845f6388030a6f83a1cb0a1b0a3b88283b315eb1f554054ac057230d4351a9a145b58622bf3ad67c8ad2b6a045c5b9954474c31159f4968b9346a7a82",
+      "_source_line_of_hex": 18,
+      "rust_parsed": {
+        "type": "NoiseHandshakeResp",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "234de4e300000000"
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 22,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0122030000019866eadbe401003a8b7f0cb466d3f967234de4e300000000aabb690fc29b48de34ddfa95b3a6f2fa1b15f5aaf5e34168825e7ff89fa66c4f234de4e3000000008b7f0cb466d3f96711000000019866eadbe4deed33fd4f74e4a2a6f952fe46df74990da2644946d33a57f083c7700469d57bc678caf8a39150adff903c5ea4f3876e4949be1dec35377693f9e6bd5a18473939bb23cc34a5a312806bca63669235a5c5e5f864600c18d03cc9afd7bc643674c57f75898b7088ebbbfee9e51f5fef0b1bd7c3b7b9622dd567ebc26a269ca64a4737098179e169c357d3da2148942253480a20a99c299fca15e5202c88ee7b90b2e05d0e68740da8",
+      "_source_line_of_hex": 23,
+      "rust_parsed": {
+        "type": "ProtocolAck",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "234de4e300000000"
+      },
+      "rust_behaviour": [
+        "ignored: ProtocolAck"
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 27,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0113060000019866eaddfa0000a08b7f0cb466d3f967008b7f0cb466d3f96700206bfc0f332a26b772f868ae0336a80c37a0dfdd42cc677159522d9f44f7afd95f00202905aa92c8e19efe771096de83772f67431b046e0d80abc4fb5640b049d757b908616e6f6e363332380000019866eaddf900409401288917e646e9f3bbb5d142e00e8259f584f982f802b078678b929f32cc1adba4262f4d99125cf44d761f1aa6081197e759a515434f5f5f014f92a7a86e01b0257e535d7a4b1b1b596d5758b23c4d2cdf73e7a757918c6b400a353c2027e51e97f5ea3eb5965b588b26532973563012adfdc3f5f66d64e9f94c8edb5232a17c02db2cac1031f6674a",
+      "_source_line_of_hex": 28,
+      "rust_parsed": {
+        "type": "NoiseIdentityAnnounce",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": null
+      },
+      "rust_behaviour": [
+        "ignored: NoiseIdentityAnnounce"
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 32,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0101030000019866eadf360000088b7f0cb466d3f967616e6f6e363332387fda2bd11ce61c83d56cdda9d668374e34e539f47e409d072bf5049acaf349510b1db6fd89a3ae15873fa7a913f0c38e7dfd7815b0a8325b40e91fcf274b9823e7e469e58d8bc52b8eb220a2bbed238795ce3c38c8c9868a759aaceb5701b145b73463eb167c63781a9d101f00e886caed77f2b1386e0f70488141590ead3a9b335c58b8306b4e35e4759ac43f5644cfe5053c6fbb501f1f139a945d85fed36967ff151661aeb803e2ada87694b0044a44f1c1671fa98278c3add6fe7696e635a32b5dc0a657364840ee4552fe07f68b6d5e3459ddf272f5ccbba1d7b767b2c850e2",
+      "_source_line_of_hex": 33,
+      "rust_parsed": {
+        "type": "Announce",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": null
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 37,
+      "declared_length": 512,
+      "byte_count": 512,
+      "raw_hex": "0112060000019866eadbe60101148b7f0cb466d3f967234de4e300000000000000004b4e225113e71dc73b092bf2de740e4ff28e79b6e798aa3a4194aec9e664328ef87e2a481399976fc2411ca478cbaaf62d31d2041c7ad32ff195f367d4852db2b7d8a52ac9e48f8fb346a2c3e75780966b038ca86ad532e49466479738c4c056b2af40b7ba4b55d5b217a9e1de0f1ceb20afa1aecdd87530554878e0496e93589f207e1191d92493ad33e2060c2f0627dd9dde8c7f33808c0d3d08e27df9defc539a3f0d8353868101ecb92b73592fda107b273c3d4b083a6ebfaf71c5137f62b575494aef7adf9ef087fb9edbda3afd1c2cae678a2ba6f5ad2b535776db4953ed39d6f72505a299ecc789232e79a5918f012960812ee1af38d81afbb709eda50b4833ccad8437337adc867fd621f2be0267cb57ceaec6f186548faecccbf13954730ed0308c288a3259fc24054b9afaa78e400fcf9594bb9259997cd6696335f3baf09fabaa17d510344a0a70fd2944e1e49da800320224424d7c61a8942cbb0fbc49845f2468509a66d81109f8108e221fb31d46c91557ae1742a2baccdc842905bfd41fce83c3555e49c803618c2d56ab2d04d7b55d92eb130d4b6c25911ba1061aa1a167c6b378a7fb28be9efe0550f213fce16e0cafaa854443d9664f8be6780a5506f7f0cc941ca59a091ea7fe11b6d1df9876d210b5857269aece",
+      "_source_line_of_hex": 38,
+      "rust_parsed": {
+        "type": "NoiseEncrypted",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "234de4e300000000"
+      },
+      "rust_reported_payload_len": 276,
+      "rust_reported_first_16": [
+        0,
+        0,
+        0,
+        0,
+        75,
+        78,
+        34,
+        81,
+        19,
+        231,
+        29,
+        199,
+        59,
+        9,
+        43,
+        242
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 44,
+      "declared_length": 512,
+      "byte_count": 512,
+      "raw_hex": "0112060000019866eadbe60101148b7f0cb466d3f967234de4e300000000000000004b4e225113e71dc73b092bf2de740e4ff28e79b6e798aa3a4194aec9e664328ef87e2a481399976fc2411ca478cbaaf62d31d2041c7ad32ff195f367d4852db2b7d8a52ac9e48f8fb346a2c3e75780966b038ca86ad532e49466479738c4c056b2af40b7ba4b55d5b217a9e1de0f1ceb20afa1aecdd87530554878e0496e93589f207e1191d92493ad33e2060c2f0627dd9dde8c7f33808c0d3d08e27df9defc539a3f0d8353868101ecb92b73592fda107b273c3d4b083a6ebfaf71c5137f62b575494aef7adf9ef087fb9edbda3afd1c2cae678a2ba6f5ad2b535776db4953ed39d6f72505a299ecc789232e79a5918f012960812ee1af38d81afbb709eda50b4833ccad8437337adc867fd621f2bea8415d65211cb169bdfefa0c43f844d08baabdc0a872bae401129235cb13b0701fe282d283d0b5282785be3939c1429be9d83d6df1ed44611095a014725b7c7c9d9db1aa3f8d2401907f1cd0264421f8243ec1ffb83b3b4bcae1301dab10a0237aa68c9c2b7e11caf6ae0411048b11c2ce459f6203e215a7747f138e779b85ed92e394fef93596c174d3e0a094e669cd596e6e6ee2c400fd6305eda55e73abe09c02e49e701ddacf7d190c80334a28470b06ad9bdb01427e69d6dee08212708531aa42355380236c242b7d02d7ce",
+      "_source_line_of_hex": 45,
+      "rust_parsed": {
+        "type": "NoiseEncrypted",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "234de4e300000000"
+      },
+      "rust_reported_payload_len": 276,
+      "rust_reported_first_16": [
+        0,
+        0,
+        0,
+        0,
+        75,
+        78,
+        34,
+        81,
+        19,
+        231,
+        29,
+        199,
+        59,
+        9,
+        43,
+        242
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 51,
+      "declared_length": 512,
+      "byte_count": 512,
+      "raw_hex": "0112060000019866eadbe60101148b7f0cb466d3f967234de4e300000000000000004b4e225113e71dc73b092bf2de740e4ff28e79b6e798aa3a4194aec9e664328ef87e2a481399976fc2411ca478cbaaf62d31d2041c7ad32ff195f367d4852db2b7d8a52ac9e48f8fb346a2c3e75780966b038ca86ad532e49466479738c4c056b2af40b7ba4b55d5b217a9e1de0f1ceb20afa1aecdd87530554878e0496e93589f207e1191d92493ad33e2060c2f0627dd9dde8c7f33808c0d3d08e27df9defc539a3f0d8353868101ecb92b73592fda107b273c3d4b083a6ebfaf71c5137f62b575494aef7adf9ef087fb9edbda3afd1c2cae678a2ba6f5ad2b535776db4953ed39d6f72505a299ecc789232e79a5918f012960812ee1af38d81afbb709eda50b4833ccad8437337adc867fd621f2be7b4186e2c16012d75fb37e99b5f286fb3e62eaf5d7abd1e8bfe75b6346a0bb9ad9290ebe2adcb34814e104f03d73c529340b03ca986a55b25276ec1e69a0b9267372fbfe686a686f0980d64a0e39193b0390a5be874771c205c80500d0b7204eb22aec5b4d39c9c980de00a5963ac2d11c073742835c2b463f1db303fb82d16f2d8a25406475b3e293c3ea6bac4b9c1b5c3b48702752afb25efdac9c8e409ed1d479bdf8ac92da306f9f2f7f1a140c140dff1a7e307c4671aef614c44d8091bf47613e35bd1d24aed51b4c9290ce",
+      "_source_line_of_hex": 52,
+      "rust_parsed": {
+        "type": "NoiseEncrypted",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "234de4e300000000"
+      },
+      "rust_reported_payload_len": 276,
+      "rust_reported_first_16": [
+        0,
+        0,
+        0,
+        0,
+        75,
+        78,
+        34,
+        81,
+        19,
+        231,
+        29,
+        199,
+        59,
+        9,
+        43,
+        242
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 58,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0101060000019866f56494010009a91d561700000000ffffffffffffffff616e6f6e796d6f757370c112a3426fa82d107cabe7d6df0321c01d7896dd0bc12da3eed9459cbcdf0a7bee578d5ef1fbe3c80705018468ccf8a2041aa61317cc7074d141b45c175656ef88de705e5e464199facac33b7a395772cbbd98d1ce60a8cf2c187fecdce0ee7e619132b2b933b970c4c16a1ba7f7b68a28725f83175a9dbf2b82bd6bb531d804ebbee681b0071279b5ac6fbc3f31bc7969286209f955aa9b5bc6ea07b22c83c203675f601e6b705b76f87250c1eb22eaca1d6fc1afbf016c2f11c836ada14696f5c5c992700789077853b7728736d6d529365d972ccca9d9",
+      "_source_line_of_hex": 59,
+      "rust_parsed": {
+        "type": "Announce",
+        "sender_id": "a91d561700000000",
+        "recipient_id": "ffffffffffffffff"
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 63,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0104060000019866f579ef01004c8b7f0cb466d3f967ffffffffffffffff100000019866f579ef2445413831433938412d354130362d343841322d413237362d39354332303632363045453108616e6f6e36333238000268691038623766306362343636643366393637db78dd86551afb083721b06ec43b6926b95963d41464cb3d0c7c634e1c0dfabeb732ba3e8ffd6c5a14631ef795474a6a05b8a139fce3deecdf29c299e3d42fc66738c284cf281aa0f1eca782c28c35594bb02a18da258892424d7095d4ce845ab65b0bf6f74da1d9d94702c4a9a966508ed8946a1e91898977e8ff18101996d38dd5faef049e8ba7fd8ce5849a1611767b2601d95696",
+      "_source_line_of_hex": 64,
+      "rust_parsed": {
+        "type": "Message",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "ffffffffffffffff"
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 68,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0110060000019866f583b40100208b7f0cb466d3f967a91d561700000000e002973ff3f8dcb944a42af4e35d4ed01b6476703dbdb50774cc3d935cf562136f8481c34a06faf97bc8a01889d1edc551135ba60dcc2c2ee2dfc356b63fbdd467b957cfb79a2a1120c6bc80d44ea9d636491fc427282346aa3bc238e6e84b55c0ea281bf5981abd4d32fb93f343c69566cdbac37d9a8d91e3560672085dec0528913cf189dd21ee9a51e7ef2b4aa63a478f322062689d9f85ae02aa220c741c38cea21fb5aa7f09507abc1dc0550883cc718c75ece464d41d07c7ae975618c981a431b6e45eff036e363a3413f7fd7d92156d494944e581c365e8720967e508a2c2",
+      "_source_line_of_hex": 69,
+      "rust_parsed": {
+        "type": "NoiseHandshakeInit",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "a91d561700000000"
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 73,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0111060000019866f584180100408b7f0cb466d3f967a91d561700000000edaca929e9a034dddb304b30f753315e2e84875bf040604b2cc9238ca817d59d0a5dbebde3fa2e595afae1d3bf327e79a3d8fd7321c330dae27c79366844f2d1d3581b74a2805404044d72fa095544583523bfe4a179d05add2847c08a8cec4dcf2975e4d7f02165fedcfe37959e92b31a5ae0f9d4c155c47c05589b0399e4ca62356c6e135f0bc91b17e1a201c364ff66437fb2a4a5eba21dc43abb50f4ebb954b6005e995a493b40fa7ed39310ab6a65a6db4f01b17c3eb1e2cac81678a0610a17d165099506f6c2876f626361cb461e710acb497a73633209d1baf7c888e9e0a2",
+      "_source_line_of_hex": 74,
+      "rust_parsed": {
+        "type": "NoiseHandshakeResp",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "a91d561700000000"
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 78,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0113060000019866f5862d0000a08b7f0cb466d3f967008b7f0cb466d3f96700206bfc0f332a26b772f868ae0336a80c37a0dfdd42cc677159522d9f44f7afd95f00202905aa92c8e19efe771096de83772f67431b046e0d80abc4fb5640b049d757b908616e6f6e363332380000019866f5862c004033ad751df78da80a2ca53412f29dd9fd06a069f42fe0f8f9aaf451abf18e80ad50ea3b6e91d4bbec67630470926e6f695f077b3ffbc4973c9bbfe6fd343f0c0df88f1821b90753fef0b0090b6e4d7ddfb4ca36afbb85aa68c83e0cead5af9e3daae484b0a82e3f1caf07d7f0c89b4e3745e8ba720a859daafc08c393427f6bc8a40663e689987b99304a",
+      "_source_line_of_hex": 79,
+      "rust_parsed": {
+        "type": "NoiseIdentityAnnounce",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": null
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 83,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0101030000019866f5876b0000088b7f0cb466d3f967616e6f6e36333238b6c50117c9a72cb230da59d4384e6112966a83b33b07ba1c595735f6c6a8c82bb670b948c6734da826a8ec3127639811c31ed8d0b7c304a7125e416141a14aecec7f5ae777405230150b1cea2a73603a9197d3ddbffda8ca2242d45d40cf5e5f41a8a7a544700f63b93fa61c4026746d07b62c624e9f2b3fcf1ebc35361025b221f6e58ede04e2a9a2cdcd93526b3f1098fea802d610cb4dce709eb7282f90d3b3b23b57aa71dc5b507e26cd8b66baf8a9ada1c76586a5b253ea5bd51bed32aa8776f0fae195c5e6bea14551998f8ba92f3ea4cf32929f54b0fdd3ff5ac9fc60ace2",
+      "_source_line_of_hex": 84,
+      "rust_parsed": {
+        "type": "Announce",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": null
+      }
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 88,
+      "declared_length": 512,
+      "byte_count": 512,
+      "raw_hex": "0112060000019866f5915d0101148b7f0cb466d3f967a91d56170000000000000000d72851aaed1ee1a2c61cb2db8d98a19ead1462ad3329177e2c87358ef7f4a837e214cae89518c800e22a8cbc1e0edaf260f3604ed31a50b7a3f6407aaf7d19b916b8b3975df8d2134b2c1cf4ea30c0f25259da9af9634fec77ba6337b138eb4b03eb0f0f999f0ef3ed9209a661469c476dbcc079bd721af4775feddf367c469a7c6cda3c93f75944dde3ffe1046a80a7699778ab6e1b327d899af64d2cf69225e99a35de7eae7cf8f1e6740fda5f1041cd4dc0f3baf87c5ac0ebc1306a4f7fb99e24b8b9831ec8ec1e84864f8a91337b0c6003862466d6cd8cedc39e014c73e2027894cef6d09705ae99bf85091dc5c25520f26370670fae693d6a564106867ae85b105a3a70504102da5a3d3d5829751552cb817c067cd41f22d995fe8a3eb00e611c54527afd2cd9fef16492aea5a52f2276bdb3e30b08407b2503b25bda2bb87f12bbf38d566e7ddb8fcdbf5c6ad0ca1c50057599085a4c6c03a86e88852aa14e3ab1050d2a1480ae03b940573dc4e1bb46e53a4de7447f76c7d4d6b3b0e913982c9620bed4c523f8f5e62869bbc90cb504bc22b8bb8f3403f32ea4af064c666e51a27396f7fe1a803a8038e9dfdceeca20427c0eebc87a5b4ae3ad21696762e44837d90627c652d78485df8b5ca5c98327433b268c018245c92909ce",
+      "_source_line_of_hex": 89,
+      "rust_parsed": {
+        "type": "NoiseEncrypted",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "a91d561700000000"
+      },
+      "rust_reported_payload_len": 276,
+      "rust_reported_first_16": [
+        0,
+        0,
+        0,
+        0,
+        215,
+        40,
+        81,
+        170,
+        237,
+        30,
+        225,
+        162,
+        198,
+        28,
+        178,
+        219
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 95,
+      "declared_length": 512,
+      "byte_count": 512,
+      "raw_hex": "0112060000019866f5915d0101148b7f0cb466d3f967a91d56170000000000000000d72851aaed1ee1a2c61cb2db8d98a19ead1462ad3329177e2c87358ef7f4a837e214cae89518c800e22a8cbc1e0edaf260f3604ed31a50b7a3f6407aaf7d19b916b8b3975df8d2134b2c1cf4ea30c0f25259da9af9634fec77ba6337b138eb4b03eb0f0f999f0ef3ed9209a661469c476dbcc079bd721af4775feddf367c469a7c6cda3c93f75944dde3ffe1046a80a7699778ab6e1b327d899af64d2cf69225e99a35de7eae7cf8f1e6740fda5f1041cd4dc0f3baf87c5ac0ebc1306a4f7fb99e24b8b9831ec8ec1e84864f8a91337b0c6003862466d6cd8cedc39e014c73e2027894cef6d09705ae99bf85091dc5c25520f26370670fae693d6a564106867ae85b105a3a70504102da5a3d3d582975914ec96e40a7bd9ff3c5fa169a33bb6e7c7a4060c3ce44fcf7a194f890c41079cc04f3dfb85e449ce049f7f6125083b6e039e6435e6c72f958e9a23c6e837df13e6039a5f4fcef05e310b266a28a693049f88ad2f386368dc118c244af24116ffe638d2bbdc6973f9dde1b9b40fe37117977ac44fa7f15d01e7fa1bb5281003f396def1bfff8f4d8a9a83ed8750161787bd2aedf9e25659d43d8ae7427395ecf71c3994c5c6169c1751ffd6db66c6fa86b37cb1d381c2c4180faa28e9291a59daf42eb8bb9b15325afb803c8c1ce",
+      "_source_line_of_hex": 96,
+      "rust_parsed": {
+        "type": "NoiseEncrypted",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "a91d561700000000"
+      },
+      "rust_reported_payload_len": 276,
+      "rust_reported_first_16": [
+        0,
+        0,
+        0,
+        0,
+        215,
+        40,
+        81,
+        170,
+        237,
+        30,
+        225,
+        162,
+        198,
+        28,
+        178,
+        219
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 102,
+      "declared_length": 512,
+      "byte_count": 512,
+      "raw_hex": "0112060000019866f5915d0101148b7f0cb466d3f967a91d56170000000000000000d72851aaed1ee1a2c61cb2db8d98a19ead1462ad3329177e2c87358ef7f4a837e214cae89518c800e22a8cbc1e0edaf260f3604ed31a50b7a3f6407aaf7d19b916b8b3975df8d2134b2c1cf4ea30c0f25259da9af9634fec77ba6337b138eb4b03eb0f0f999f0ef3ed9209a661469c476dbcc079bd721af4775feddf367c469a7c6cda3c93f75944dde3ffe1046a80a7699778ab6e1b327d899af64d2cf69225e99a35de7eae7cf8f1e6740fda5f1041cd4dc0f3baf87c5ac0ebc1306a4f7fb99e24b8b9831ec8ec1e84864f8a91337b0c6003862466d6cd8cedc39e014c73e2027894cef6d09705ae99bf85091dc5c25520f26370670fae693d6a564106867ae85b105a3a70504102da5a3d3d582975ba5ee05247b42db4bf97f1bd5523259189707bb655addae39287a30ccbdec8e1e50ed439afe03182e7e11ae8c8bdd4fe7dc39cd61b08a18f23244cee998fcc356f5abff1aeb7d7051781a242d7e27dfcebe1e28e93a62d61bebf37110ca457bf209dfdbe6776861fe5f8c976f2ba0624e560b7e2381b4a9eb6bb80d4cc5c271ea4ef200e4991e586334e4702c3fbd14ed780b322da32cdc434539ff060c7d04960f293dc6a31871caa7b107923b057a72ab4a8e2ff74acea75874ba0854872c53ca4688f84003dafb1fcd72221ce",
+      "_source_line_of_hex": 103,
+      "rust_parsed": {
+        "type": "NoiseEncrypted",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "a91d561700000000"
+      },
+      "rust_reported_payload_len": 276,
+      "rust_reported_first_16": [
+        0,
+        0,
+        0,
+        0,
+        215,
+        40,
+        81,
+        170,
+        237,
+        30,
+        225,
+        162,
+        198,
+        28,
+        178,
+        219
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 109,
+      "declared_length": 512,
+      "byte_count": 512,
+      "raw_hex": "0112060000019866f5915d0101148b7f0cb466d3f967a91d56170000000000000000d72851aaed1ee1a2c61cb2db8d98a19ead1462ad3329177e2c87358ef7f4a837e214cae89518c800e22a8cbc1e0edaf260f3604ed31a50b7a3f6407aaf7d19b916b8b3975df8d2134b2c1cf4ea30c0f25259da9af9634fec77ba6337b138eb4b03eb0f0f999f0ef3ed9209a661469c476dbcc079bd721af4775feddf367c469a7c6cda3c93f75944dde3ffe1046a80a7699778ab6e1b327d899af64d2cf69225e99a35de7eae7cf8f1e6740fda5f1041cd4dc0f3baf87c5ac0ebc1306a4f7fb99e24b8b9831ec8ec1e84864f8a91337b0c6003862466d6cd8cedc39e014c73e2027894cef6d09705ae99bf85091dc5c25520f26370670fae693d6a564106867ae85b105a3a70504102da5a3d3d5829753202e4e40110b4efee5d35d1018ff428d219068f31551ef87f1d0b2a7096b8cf6876058e93b31291d285c14cfa0409ec7d7c62db6116d89d77ed3703e64600a152783645f6aa1659c5369372868c4dfa65c076d4fa92fe7f2b28090de3d6c5253a14bfc383e11d2cfd7ee3a5a57b194bb17132618f053a204decb11f5d1e0e8027e2cf86095479a8a236f90f2a78309b6008117e0f378ee307cfb2ae126f04a1e34c3ac49576fbd9a136af10d9620632936a1e4f8b544e4fb7edf5b3041fecc2cfa785bd8ab350a4eb5bd249d8ce",
+      "_source_line_of_hex": 110,
+      "rust_parsed": {
+        "type": "NoiseEncrypted",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "a91d561700000000"
+      },
+      "rust_reported_payload_len": 276,
+      "rust_reported_first_16": [
+        0,
+        0,
+        0,
+        0,
+        215,
+        40,
+        81,
+        170,
+        237,
+        30,
+        225,
+        162,
+        198,
+        28,
+        178,
+        219
+      ]
+    },
+    {
+      "source_file": "debug.log",
+      "source_line": 116,
+      "declared_length": 256,
+      "byte_count": 256,
+      "raw_hex": "0122030000019866f5c41101003a8b7f0cb466d3f967a91d5617000000004a45d439b72ff24987f59ecbe825474ed4e5228043b843df9a447c81cb8c8ff4a91d5617000000008b7f0cb466d3f96712000000019866f5c411806d1cfb0b3bb63429796dfceb6d38f304f947986b0860c85aa5a2d81ecd6d2aaa7aad83a5ba73ef64083e610dfb4977e148f5bd3ba2d390b9913a72904d3f9f4e266e1d727386cca37be7d249dab61c735f6e9896782658b70685c314f4584d919db3cfce3f8b79b8e81932897f0fd0e50baf6715c499d44cb498c2b6ae71362180da06b5f9326afb5cd2fb07d39971d6033329bc77f015d18095b9fd1ee53405de82e578b4eba8",
+      "_source_line_of_hex": 117,
+      "rust_parsed": {
+        "type": "ProtocolAck",
+        "sender_id": "8b7f0cb466d3f967",
+        "recipient_id": "a91d561700000000"
+      },
+      "rust_behaviour": [
+        "ignored: ProtocolAck"
+      ]
+    }
+  ],
+  "unpadding_oracle": [
+    {
+      "declared_length": 256,
+      "unpadded_length": 39,
+      "sender_id": "234de4e300000000"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 106,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 72,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 126,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 88,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 182,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 30,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 512,
+      "unpadded_length": 306,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 116,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 512,
+      "unpadded_length": 306,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 116,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 512,
+      "unpadded_length": 306,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 116,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 39,
+      "sender_id": "a91d561700000000"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 106,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 62,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 94,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 182,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 30,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 512,
+      "unpadded_length": 306,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 116,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 512,
+      "unpadded_length": 306,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 116,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 512,
+      "unpadded_length": 306,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 116,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 512,
+      "unpadded_length": 306,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 116,
+      "sender_id": "8b7f0cb466d3f967"
+    },
+    {
+      "declared_length": 256,
+      "unpadded_length": 88,
+      "sender_id": "8b7f0cb466d3f967"
+    }
+  ],
+  "noise_lengths": [
+    {
+      "key": "handshake_init_len",
+      "value": 32,
+      "line": "[1754073324] [DEBUG] Handshake initiated, data length: 32"
+    },
+    {
+      "key": "handshake_resp_len",
+      "value": 64,
+      "line": "[1754073324] [DEBUG] Handshake response processed, response length: 64"
+    },
+    {
+      "key": "handshake_resp_len",
+      "value": 0,
+      "line": "[1754074023] [DEBUG] Handshake response processed, response length: 0"
+    }
+  ]
+}

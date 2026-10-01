@@ -1,0 +1,2 @@
+﻿cryptography>=45
+noiseprotocol>=0.3
