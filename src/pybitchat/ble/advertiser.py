@@ -185,7 +185,14 @@ class Advertiser:
 
             self._ruta = RUTA_ANUNCIO
             await self._exportar_anuncio()
-            self._proxy = obj.get_interface(IFACE_MANAGER, hci)
+
+            # Hace falta un ProxyObject **propio para la ruta del adaptador**.
+            # `ProxyObject.get_interface(name)` sólo acepta el nombre: la ruta
+            # se fijó al crear el proxy con `get_proxy_object(bus, ruta,
+            # introspección)`. Por eso no vale reutilizar el proxy de "/".
+            introspeccion_hci = await self._bus.introspect("org.bluez", hci)
+            obj_hci = self._bus.get_proxy_object("org.bluez", hci, introspeccion_hci)
+            self._proxy = obj_hci.get_interface(IFACE_MANAGER)
 
             if await self._registrar(con_scan_response=True):
                 self.en_scan_response = True
