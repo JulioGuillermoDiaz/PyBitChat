@@ -63,8 +63,21 @@ IFACE_MANAGER = "org.bluez.LEAdvertisingManager1"
 #: Interfaz que debe implementar el objeto de anuncio que registramos.
 IFACE_ADVERTISEMENT = "org.bluez.LEAdvertisement1"
 
-#: Sufijo del nombre de servicio D-Bus para nuestro objeto de anuncio.
+#: Nombre de bus D-Bus que tomamos. Lleva **puntos**, como todo nombre de bus.
 NOMBRE_SERVICIO = "org.bluez.pybitchat"
+
+#: Ruta del objeto donde se publica la interfaz `LEAdvertisement1`.
+#:
+#: ⚠️ Lleva **barras**, no puntos. Cada elemento de una ruta de objeto D-Bus
+#: tiene que cumplir `[A-Za-z0-9_]`, así que un punto dentro de un elemento es
+#: inválido y BlueZ lo rechaza con `InvalidObjectPathError`. Confundir el nombre
+#: de bus con la ruta de objeto es el error más obvio de este fichero, y sólo
+#: aparece al ejecutar.
+RUTA_SERVICIO = "/org/bluez/pybitchat"
+
+#: Ruta del anuncio. Debe empezar por la del servicio, porque es donde se
+#: publica el objeto que BlueZ va a llamar para liberarlo.
+RUTA_ANUNCIO = f"{RUTA_SERVICIO}/advertisement"
 
 
 def _adaptador() -> str:
@@ -170,7 +183,7 @@ class Advertiser:
                 )
                 return False
 
-            self._ruta = f"/{NOMBRE_SERVICIO}/advertisement"
+            self._ruta = RUTA_ANUNCIO
             await self._exportar_anuncio()
             self._proxy = obj.get_interface(IFACE_MANAGER, hci)
 
@@ -238,7 +251,7 @@ class Advertiser:
             async def Release(self) -> "":  # noqa: N802, E704 - firma D-Bus vacía
                 log.info("BlueZ liberó el anuncio")
 
-        self._bus.export(f"/{NOMBRE_SERVICIO}", _Anuncio())
+        self._bus.export(RUTA_SERVICIO, _Anuncio())
 
     async def stop(self) -> None:
         """Da de baja el anuncio. No lanza si nunca se arrancó."""
@@ -247,7 +260,7 @@ class Advertiser:
                 await self._proxy.call_unregister_advertisement(self._ruta)
         if self._bus is not None:
             with contextlib.suppress(Exception):
-                self._bus.unexport(f"/{NOMBRE_SERVICIO}", None)
+                self._bus.unexport(RUTA_SERVICIO, None)
             with contextlib.suppress(Exception):
                 self._bus.disconnect()
         self._proxy = None
@@ -261,4 +274,12 @@ class Advertiser:
         await self.stop()
 
 
-__all__ = ["IFACE_ADVERTISEMENT", "IFACE_MANAGER", "Advertiser", "opciones_anuncio"]
+__all__ = [
+    "IFACE_ADVERTISEMENT",
+    "IFACE_MANAGER",
+    "NOMBRE_SERVICIO",
+    "RUTA_ANUNCIO",
+    "RUTA_SERVICIO",
+    "Advertiser",
+    "opciones_anuncio",
+]

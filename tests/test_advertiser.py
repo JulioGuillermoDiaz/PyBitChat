@@ -24,6 +24,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from pybitchat.ble.advertiser import (  # noqa: E402
     IFACE_ADVERTISEMENT,
     IFACE_MANAGER,
+    NOMBRE_SERVICIO,
+    RUTA_ANUNCIO,
+    RUTA_SERVICIO,
     opciones_anuncio,
 )
 from pybitchat.ble.gatt import SERVICE_UUID  # noqa: E402
@@ -103,6 +106,52 @@ class TestRutasDeCaida(unittest.TestCase):
                 ]
                 self.assertEqual(len(todos), 1)
                 self.assertEqual(list(todos[0].values()), [PEER_ID_REAL])
+
+
+class TestRutaDeObjeto(unittest.TestCase):
+    """El bug de la ruta: nombre de bus con puntos donde va una ruta.
+
+    Cada elemento de una ruta de objeto D-Bus tiene que cumplir `[A-Za-z0-9_]`,
+    así que un punto dentro de un elemento es inválido. Se usa el nombre de bus
+    como ruta y BlueZ responde `InvalidObjectPathError`.
+
+    Esto **sí** es comprobable sin adaptador: la validación es aritmética sobre
+    la cadena, y es la clase de fallo que sólo aparecía al ejecutar.
+    """
+
+    #: Elementos válidos según la especificación D-Bus.
+    ELEMENTO = __import__("re").compile(r"^[A-Za-z0-9_]+$")
+
+    def test_la_ruta_usa_barras(self):
+        self.assertEqual(RUTA_SERVICIO, "/org/bluez/pybitchat")
+        self.assertIn("/", RUTA_SERVICIO[1:])
+
+    def test_la_ruta_no_tiene_puntos(self):
+        """Este es exactamente el fallo: un punto en un elemento de la ruta."""
+        self.assertNotIn(".", RUTA_SERVICIO)
+
+    def test_cada_elemento_cumple_el_patron(self):
+        self.assertTrue(RUTA_SERVICIO.startswith("/"))
+        for elemento in RUTA_SERVICIO[1:].split("/"):
+            with self.subTest(elemento=elemento):
+                self.assertRegex(elemento, self.ELEMENTO)
+
+    def test_el_nombre_de_bus_si_lleva_puntos(self):
+        """Ahí los puntos son obligatorios: es un nombre, no una ruta."""
+        self.assertIn(".", NOMBRE_SERVICIO)
+        self.assertNotIn(" ", NOMBRE_SERVICIO)
+
+    def test_la_ruta_del_anuncio_bajo_la_del_servicio(self):
+        """BlueZ llama a Release() en la ruta que le registramos, así que el
+        objeto tiene que estar exportado en la ruta que le pasamos."""
+        self.assertTrue(RUTA_ANUNCIO.startswith(RUTA_SERVICIO + "/"))
+        self.assertNotIn(".", RUTA_ANUNCIO)
+
+    def test_la_ruta_del_anuncio_es_valida(self):
+        self.assertTrue(RUTA_ANUNCIO.startswith("/"))
+        for elemento in RUTA_ANUNCIO[1:].split("/"):
+            with self.subTest(elemento=elemento):
+                self.assertRegex(elemento, self.ELEMENTO)
 
 
 class TestNombresDeInterfaz(unittest.TestCase):
