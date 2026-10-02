@@ -884,6 +884,81 @@ Lo pendiente:
 
 ---
 
+### 12.9 Conformidad con los tests de la app, y v2 implementado
+
+Sin adaptador Bluetooth no se puede probar la interoperabilidad en vivo. Lo que
+sí se puede es comprobar nuestro códec contra **los tests que el propio autor del
+protocolo escribió sobre su propia implementación**:
+`app/src/test/java/com/bitchat/android/protocol/BinaryProtocolTest.kt`, 54 casos.
+
+Portados 48 a `tests/test_conformance.py`, con el nombre original del test entre
+comillas en cada caso para poder rastrearlo.
+
+> ⚠️ Esto **no sustituye** a la interoperabilidad en vivo. Nada offline la
+> sustituye. Demuestra que nuestro códec coincide con la especificación tal y
+> como la implementa la app; no que la app acepte lo que emitimos.
+
+#### Tres bugs reales que sólo aparecen al portar
+
+**1. `sender_id` no se normalizaba a 8 bytes.** La app rellena con ceros lo que
+sobra corto y trunca lo que sobra largo (`BinaryProtocol.kt:311-315`). Nosotros lo
+emitíamos tal cual, así que un `sender_id` de 4 bytes producía un paquete 4 bytes
+corto que **nadie podía decodificar**.
+
+Ahora se rellena, pero **no se trunca**: truncar la identidad de un par es
+dirección incorrecta, y un id demasiado largo debe descubrirse aquí en vez de
+convertirse en otro par distinto. Es una divergencia deliberada respecto a la app.
+
+**2. `zlib.error` se propagaba en vez de rechazarse.** Este es el más grave. En
+Python, datos comprimidos malformados no dan un resultado vacío: `decompress()`
+lanza `zlib.error`. Sin capturarla, **un par que mandase un payload comprimido
+corrupto tumbaría el bucle de recepción**, en vez de que se descartara el paquete.
+
+La app lo captura explícitamente (`CompressionUtil.kt:121-124`) para que la
+comprobación zlib pueda fallar y caer a raw sin romper nada. Corregido igual.
+
+**3. v2 no estaba implementado.** El header de 16 bytes, la longitud u32 y la
+ruta opcional eran un `UnsupportedVersionError`. Ahora están implementados.
+
+Android nunca *emite* v2 (`BitchatPacket.version = 1u`), pero su suite de tests lo
+cubre a fondo, así que dejarlo fuera descartaba unos 25 vectores de conformidad.
+
+#### El vector más valioso: el codificador ajeno
+
+`re-encoding preserves a foreign encoder's compressed payload` construye a mano
+un bloque *stored* de DEFLATE: bytes que **el `zlib` de Python jamás generaría**
+para ese payload. Comprueba que re-codificar reproduce los bytes del originator.
+
+Portado tal cual, y con un testextra que demuestra el riesgo por el otro lado:
+descartando el `WirePayload` y comprimiendo de nuevo, la salida cambia. Eso es
+justo lo que haría que una firma válida dejara de verificar.
+
+#### La preimagen de firma, que nos faltaba
+
+`toBinaryDataForSigning` quita la firma y **fija el TTL a 0**
+(`SYNC_TTL_HOPS`). La razón está en el propio test de la app, y merece citarse:
+
+> *If TTL leaks into the signed data, a packet relayed even once would fail
+> signature verification at the recipient.*
+
+El TTL baja en cada salto, así que un paquete reenviado *una sola vez* llega con
+un TTL distinto del firmado. Implementado como
+`Packet.to_binary_data_for_signing()`, con un test que comprueba que la firma no
+depende de los saltos dados.
+
+#### El off-by-one de la cabecera resulta estar propagado
+
+`FragmentManager.kt:98` usa 13 y 15 donde los reales son 14 y 16. El mismo error
+aparece en el comentario de un test de la app (*"v2 header size (15 bytes)"*). No
+fue un descuido puntual: está repetido, y de ahí procede el "13-byte header" del
+README.
+
+#### Estado
+
+286 tests en verde. `test_conformance.py` aporta 48.
+
+---
+
 ## 13. Anexo: los tres oráculos de validación
 
 ### 13.1 Definición

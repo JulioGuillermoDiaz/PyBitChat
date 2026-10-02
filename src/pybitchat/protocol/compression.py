@@ -172,11 +172,26 @@ def _inflate_exact(data: bytes, original_size: int, wbits: int) -> bytes | None:
        `eof`: si quedara salida pendiente, el stream no habría terminado.
     3. `remaining != 0` -> sobran bytes sin consumir tras el final del stream.
 
-    Devolver `None` en vez de raise: quien llama decide si es un paquete
-    descartable o un error de programación.
+    ## Por qué se captura `zlib.error`
+
+    Datos malformados no dan un resultado vacío: `decompress()` lanza
+    `zlib.error`. Sin capturarla, un par que mande un payload comprimido
+    corrupto tumbaría el bucle de recepción en vez de que se descartara el
+    paquete.
+
+    La app hace lo mismo: envuelve la llamada en un `try` y devuelve `null`
+    (`CompressionUtil.kt:121-124`). Es lo que permite que la comprobación zlib
+    falle y se caiga a raw sin romper nada.
+
+    Devolver `None` en vez de propagar: quien decide qué hacer con un stream
+    inválido es el descompresor, que sí distingue "rechazado" de "error de
+    programación".
     """
     d = zlib.decompressobj(wbits)
-    salida = d.decompress(data, original_size)
+    try:
+        salida = d.decompress(data, original_size)
+    except zlib.error:
+        return None
 
     if len(salida) != original_size:
         return None

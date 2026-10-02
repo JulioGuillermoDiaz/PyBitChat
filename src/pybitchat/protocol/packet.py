@@ -51,9 +51,9 @@ from dataclasses import dataclass, field, replace
 from . import compression
 from .types import (
     HEADER_SIZE,
-    PEER_ID_SIZE,
+    HEADER_SIZE_V2,
     PADDING_BUCKETS,
-    PROTOCOL_VERSION,
+    PEER_ID_SIZE,
     SIGNATURE_SIZE,
     LegacyMessageType,
     MessageType,
@@ -69,9 +69,26 @@ class UnsupportedVersionError(ProtocolError):
     """La versión de protocolo es válida pero todavía no está implementada."""
 
 
-#: Versiones que el otro extremo acepta (`BinaryProtocol.kt:409`) pero que aquí
-#: no se implementan. Sirve para dar un error útil en vez de "desconocida".
-SUPPORTED_UPSTREAM_VERSIONS = frozenset({0x02})
+#: Tamaño de cabecera por versión (`BinaryProtocol.kt:208-209`,
+#: `getHeaderSize` en `:220-225`).
+#:
+#: ⚠️ `FragmentManager.kt:98` usa 13 y 15 para v1 y v2. Son uno menos que los
+#: reales, y de ahí procede el "13-byte header" del README de Android. Aquí van
+#: los valores del formato de cable, que es lo que verified empíricamente con
+#: 21 paquetes reales.
+HEADER_SIZE_BY_VERSION: dict[int, int] = {1: HEADER_SIZE, 2: HEADER_SIZE_V2}
+
+#: Versiones que el otro extremo acepta (`BinaryProtocol.kt:409`). Todas están
+#: implementadas; queda la constante para que un test pueda afirmarlo.
+KNOWN_UPSTREAM_VERSIONS = frozenset({1, 2})
+
+#: Versión por defecto al construir. Android emite siempre v1
+#: (`BitchatPacket.version = 1u`, `:78`).
+PROTOCOL_VERSION = 0x01
+
+#: TTL con el que se firma, para que la firma no dependa de los saltos dados.
+#: `SYNC_TTL_HOPS` en `BitchatPacket.toBinaryDataForSigning`.
+SYNC_TTL_HOPS = 0
 
 
 class Reader:
@@ -143,7 +160,20 @@ def _u8_prefixed(value: bytes) -> bytes:
 
 @dataclass(frozen=True, slots=True)
 class PacketHeader:
-    """Cabecera de 14 bytes.
+    """Cabecera de 14 bytes en v1 y 16 en v2.
+
+    La diferencia no es un detalle: v2 usa **longitud de payload u32** en lugar
+    de u16, lo que permite payloads de más de 64 KiB y añade 2 bytes al
+    principio. Confundirlas desplaza todos los campos siguientes.
+
+    | offset | v1 (14 B) | v2 (16 B) |
+    |--------|-----------|-----------|
+    | 0      | version   | version   |
+    | 1      | type      | type      |
+    | 2      | ttl       | ttl       |
+    | 3      | timestamp | timestamp |
+    | 11     | flags     | flags     |
+    | 12     | payload_len u16 | payload_len **u32** |
 
     El byte de tipo se guarda **crudo** (`raw_type`) porque BitChat tiene dos
     dialectos vivos y renumerados entre sí. Se exponen dos vistas:
@@ -161,6 +191,21 @@ class PacketHeader:
     timestamp: int
     flags: PacketFlags
     payload_len: int
+
+    @property
+    def header_size(self) -> int:
+        """Tamaño de la cabecera en bytes, según la versión."""
+        return HEADER_SIZE_BY_VERSION[self.version]
+
+    @property
+    def length_field_size(self) -> int:
+        """Bytes que ocupa el campo de longitud del payload.
+
+        Lo que sigue a la cabecera. Importa porque `payload_len` incluye el
+        tamaño original del payload cuando va comprimido, y ese campo también
+        cambia de ancho con la versión.
+        """
+        return 4 if self.version >= 2 else 2
 
     @property
     def type(self) -> MessageType | None:
@@ -187,8 +232,8 @@ class PacketHeader:
     @classmethod
     def parse(cls, r: Reader) -> "PacketHeader":
         version = r.u8("version")
-        if version != PROTOCOL_VERSION:
-            if version in SUPPORTED_UPSTREAM_VERSIONS:
+        if version not in HEADER_SIZE_BY_VERSION:
+            if version in KNOWN_UPSTREAM_VERSIONS:
                 raise UnsupportedVersionError(
                     f"versión de protocolo v{version} reconocida pero no "
                     f"implementada: cabecera de 16 B, longitud u32 y ruta opcional"
@@ -198,7 +243,9 @@ class PacketHeader:
         ttl = r.u8("ttl")
         timestamp = r.u64("timestamp")
         flags = PacketFlags(r.u8("flags"))
-        payload_len = r.u16("payload_len")
+        payload_len = (
+            r.u32("payload_len") if version >= 2 else r.u16("payload_len")
+        )
         return cls(version, raw_type, ttl, timestamp, flags, payload_len)
 
     def to_bytes(self) -> bytes:
@@ -248,13 +295,15 @@ class WirePayload:
 
 @dataclass(slots=True)
 class Packet:
-    """Sobre completo: cabecera + ids + payload + firma + relleno."""
+    """Sobre completo: cabecera + ids + ruta + payload + firma + relleno."""
 
     header: PacketHeader
     sender_id: bytes
     payload: bytes
     recipient_id: bytes | None = None
     signature: bytes | None = None
+    #: Saltos de la ruta, cada uno de 8 bytes. Sólo existe en v2.
+    route: list[bytes] | None = None
     padding: bytes = field(default=b"", repr=False)
     #: Bytes originales del cable, si el payload vino comprimido. `None` si vino
     #: en claro o si lo generamos nosotros.
@@ -266,7 +315,11 @@ class Packet:
     def from_bytes(cls, buf: bytes) -> "Packet":
         r = Reader(buf)
         header = PacketHeader.parse(r)
-        assert r.pos == HEADER_SIZE, "cabecera mal dimensionada"
+        if r.pos != header.header_size:
+            raise ProtocolError(
+                f"cabecera mal dimensionada: consumidos {r.pos} B, "
+                f"la v{header.version} mide {header.header_size} B"
+            )
 
         sender_id = r.raw(PEER_ID_SIZE, "sender_id")
 
@@ -274,16 +327,34 @@ class Packet:
         if header.flags & PacketFlags.HAS_RECIPIENT:
             recipient_id = r.raw(PEER_ID_SIZE, "recipient_id")
 
+        # La ruta sólo existe en v2. En v1 el flag se ignora y el paquete se
+        # acepta sin ruta, que es lo que hace la app (`BinaryProtocol.kt:425`
+        # y el test "v1 decoder ignores HAS_ROUTE flag").
+        route = None
+        if header.version >= 2 and header.flags & PacketFlags.HAS_ROUTE:
+            count = r.u8("número de saltos")
+            if count:
+                route = [r.raw(PEER_ID_SIZE, f"salto {i}") for i in range(count)]
+            # Conteo 0 se canoniza a `None` (`BinaryProtocol.kt:476`): la
+            # representación vacía y la ausente no deben distinguirse.
+
         wire_payload = None
         if header.flags & PacketFlags.IS_COMPRESSED:
-            # v1: el tamaño original ocupa 2 bytes dentro de payload_len.
-            if header.payload_len < 2:
+            # El tamaño original va dentro de `payload_len` y ocupa u16 en v1,
+            # u32 en v2.
+            ancho = header.length_field_size
+            if header.payload_len < ancho:
                 raise ProtocolError(
                     f"payload comprimido demasiado corto: {header.payload_len} B "
-                    "no alcanza ni para el tamaño original"
+                    f"no alcanza ni para el tamaño original ({ancho} B)"
                 )
-            original_size = r.u16("original_size")
-            comprimido = r.raw(header.payload_len - 2, "compressed_payload")
+            original_size = (
+                r.u32("original_size") if header.version >= 2
+                else r.u16("original_size")
+            )
+            comprimido = r.raw(
+                header.payload_len - ancho, "compressed_payload"
+            )
             try:
                 payload = compression.decompress(comprimido, original_size)
             except compression.CompressionError as exc:
@@ -302,6 +373,7 @@ class Packet:
             payload=payload,
             recipient_id=recipient_id,
             signature=signature,
+            route=route,
             padding=r.rest(),
             wire_payload=wire_payload,
         )
@@ -337,13 +409,44 @@ class Packet:
         Si el payload vino comprimido por alguien y sigue siendo el mismo, se
         reusan sus bytes. Re-comprimir aquí es justo el error que rompe las
         firmas ajenas.
+
+        El tamaño original se antepone al stream y `payload_len` lo incluye. Su
+        ancho depende de la versión: u16 en v1, u32 en v2.
         """
         if self.wire_payload is not None and self.wire_payload.matches(self.payload):
-            cabecera = struct.pack(">H", len(self.payload))
-            return int(PacketFlags.IS_COMPRESSED), cabecera + self.wire_payload.wire
+            ancho = 4 if self.header.version >= 2 else 2
+            original = (
+                struct.pack(">I", len(self.payload))
+                if ancho == 4
+                else struct.pack(">H", len(self.payload))
+            )
+            return (
+                int(PacketFlags.IS_COMPRESSED),
+                original + self.wire_payload.wire,
+            )
         return 0, self.payload
 
+    @staticmethod
+    def _normalise_peer_id(valor: bytes, campo: str) -> bytes:
+        """Ajusta un identificador de par al ancho fijo del cable.
+
+        La app rellena con ceros lo que sobra corto y trunca lo que sobra largo
+        (`BinaryProtocol.kt:311-315`). Aquí sólo se rellena: **truncar la
+        identidad de un par es dirección incorrecta**, y un id demasiado largo
+        debe descubrirse en vez de convertirse en otro par distinto.
+
+        Rellenar no es adivinar: un id de 4 bytes no puede significar otra cosa
+        que 4 bytes y ceros, así que el relleno es la única lectura posible.
+        """
+        if len(valor) > PEER_ID_SIZE:
+            raise ProtocolError(
+                f"{campo} no puede medir más de {PEER_ID_SIZE} bytes, "
+                f"tiene {len(valor)}: truncarlo cambiaría la identidad del par"
+            )
+        return valor.ljust(PEER_ID_SIZE, b"\x00")
+
     def to_bytes(self, *, include_padding: bool = True) -> bytes:
+        version = self.header.version
         flags = PacketFlags(0)
         if self.recipient_id is not None:
             flags |= PacketFlags.HAS_RECIPIENT
@@ -352,20 +455,34 @@ class Packet:
         flag_compresion, cuerpo_payload = self._payload_wire()
         flags |= PacketFlags(flag_compresion)
 
+        # La ruta sólo existe en v2. En v1 se descarta en silencio, igual que
+        # la app, porque un flag heredado de otro emisor no invalida el paquete.
+        ruta = self.route if version >= 2 else None
+        if ruta:
+            flags |= PacketFlags.HAS_ROUTE
+
+        longitud = (
+            struct.pack(">I", len(cuerpo_payload)) if version >= 2
+            else struct.pack(">H", len(cuerpo_payload))
+        )
+
         parts = [
-            struct.pack(">BBB", PROTOCOL_VERSION, self.header.raw_type, self.header.ttl),
+            struct.pack(">BBB", version, self.header.raw_type, self.header.ttl),
             struct.pack(">Q", self.header.timestamp),
             struct.pack(">B", int(flags)),
-            struct.pack(">H", len(cuerpo_payload)),
-            self.sender_id,
+            longitud,
+            self._normalise_peer_id(self.sender_id, "sender_id"),
         ]
         if self.recipient_id is not None:
-            if len(self.recipient_id) != PEER_ID_SIZE:
-                raise ProtocolError(
-                    f"recipient_id debe tener {PEER_ID_SIZE} bytes, "
-                    f"tiene {len(self.recipient_id)}"
-                )
-            parts.append(self.recipient_id)
+            parts.append(
+                self._normalise_peer_id(self.recipient_id, "recipient_id")
+            )
+        if ruta:
+            # El recuento se limita a 255 por el ancho de un byte
+            # (`BinaryProtocol.kt:330`).
+            saltos = [self._normalise_peer_id(h, "salto de ruta") for h in ruta[:255]]
+            parts.append(bytes((len(saltos),)))
+            parts.extend(saltos)
         parts.append(cuerpo_payload)
         if self.signature is not None:
             if len(self.signature) != SIGNATURE_SIZE:
@@ -387,6 +504,32 @@ class Packet:
     @property
     def recipient_id_hex(self) -> str | None:
         return self.recipient_id.hex() if self.recipient_id is not None else None
+
+    def with_ttl(self, ttl: int) -> "Packet":
+        """Copia con el TTL sustituido. Los saltos lo decrementan al reenviar."""
+        return replace(self, header=replace(self.header, ttl=ttl & 0xFF))
+
+    def to_binary_data_for_signing(self, *, ttl: int = SYNC_TTL_HOPS) -> bytes:
+        """Bytes que se firman: sin firma y con el TTL fijado.
+
+        Reproduce `BitchatPacket.toBinaryDataForSigning`. Dos reglas, y las dos
+        importan:
+
+        1. **La firma se quita.** No se puede firmar algo que incluye su propia
+           firma.
+        2. **El TTL se fija a 0** (`SYNC_TTL_HOPS`), en vez de usar el actual.
+
+        La segunda es la razón de fondo: el TTL baja en cada salto, así que un
+        paquete que ha sido reenviado *una sola vez* llega con un TTL distinto
+        del que se firmó. Si el TTL entrase en la preimagen, la verificación
+        fallaría en el receptor y el mensaje sería descartado. Fijándolo a 0,
+        la firma es idéntica la haya recorrido el paquete cero o veinte saltos.
+
+        Devuelve los bytes sin relleno: el relleno no forma parte del paquete.
+        """
+        copia = replace(self, signature=None)
+        copia = copia.with_ttl(ttl)
+        return copia.to_bytes(include_padding=False)
 
     def __len__(self) -> int:
         return len(self.to_bytes())

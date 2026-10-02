@@ -27,7 +27,19 @@ $env:PYTHONIOENCODING='utf-8'
 | `tests/test_current_payloads.py` | 44 | `MESSAGE`, TLV, voz |
 | `tests/test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad |
 | `tests/test_transport.py` | 71 | Compresión, reensamblado, GATT, transporte |
-| **Total** | **238** | **todos en verde** |
+| `tests/test_conformance.py` | 48 | **Portado de los tests de la propia app** |
+| **Total** | **286** | **todos en verde** |
+
+### Sobre `test_conformance.py`
+
+Cada caso viene de
+`app/src/test/java/com/bitchat/android/protocol/BinaryProtocolTest.kt`, con el
+nombre original entrecomillado. Son **las expectativas del autor del protocolo
+sobre su propia implementación**, no las nuestras.
+
+⚠️ No sustituye a la interop en vivo. Nada offline la sustituye. Si algún día
+esta suite pasa y el cliente real no conecta, el fallo está en el transporte,
+no en el códec.
 
 Detalle importante del entorno: **PowerShell destroza los `python -c` en línea
 con llaves y comillas**. Para scripts de un solo uso, escribir un fichero y
@@ -123,9 +135,17 @@ Ficheros con el detalle de cada decisión:
     descontando el sobre real. Sin ruta da 469, pero con rutas largas el fijo se
     queda corto y el relleno empuja cada fragmento al cubo de 1024.
 
-12. **Sólo v1.** Android acepta v1 y v2 pero emite siempre v1
-    (`BitchatPacket.version = 1u`). `packet.py` rechaza v2 con un error propio
-    (`UnsupportedVersionError`) en vez de llamarlo "versión desconocida".
+12. **v1 y v2, ambas implementadas.** Android emite siempre v1
+    (`BitchatPacket.version = 1u`) pero acepta las dos, y su suite de tests cubre
+    v2 a fondo. v2 cambia el tamaño de cabecera a 16 B y la longitud del payload
+    a u32, y añade una sección de ruta opcional. Una versión desconocida da
+    `UnsupportedVersionError`, que dice "reconocida pero no implementada" en vez
+    de "desconocida".
+
+13. **La preimagen de firma no incluye el TTL.** `to_binary_data_for_signing()`
+    quita la firma y fija el TTL a 0. El TTL baja en cada salto, así que
+    incluirlo haría que un paquete reenviado una sola vez llegue con firma
+    inválida.
 
 ---
 
@@ -226,8 +246,17 @@ que faltaban: H6 `REQUEST_SYNC`, H7 `FILE_TRANSFER`, H8 `VOICE_FRAME`, más el
 
 8. **El directorio temporal (`%TEMP%`) pierde los caracteres no Latin-1.**
    Al escribir ahí, los em-dash y los emoji se sustituyen por `-` y `?`. Los
-   ficheros del proyecto no salen intactos: se conservan. Razonable para preparar un
+   ficheros del proyecto no: se conservan intactos. Razonable para preparar un
    trozo de informe, pero hay que comprobar el resultado antes de insertarlo.
+
+9. **`zlib.error` no es un resultado vacío: es una excepción.** Este es el que más
+   cuesta olvidar. En Python, datos comprimidos malformados no devuelven `None`
+   ni cadena vacía, **lanzan**. Sin capturarla, un payload corrupto tumba el
+   bucle de recepción en vez de descartarse. La app lo captura explícitamente
+   (`CompressionUtil.kt:121-124`) y hay que hacerlo igual.
+
+10. **v1 y v2 están implementadas.** Cabecera de 14 y 16 bytes, longitud u16 y
+    u32, ruta opcional sólo en v2. Android emite siempre v1 pero acepta las dos.
 
 ---
 
