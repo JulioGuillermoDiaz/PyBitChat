@@ -42,14 +42,13 @@ async def principal(args: argparse.Namespace) -> int:
     anuncio = Advertiser(identidad.peer_id)
     ok = await anuncio.start()
     if not ok:
-        print("\nNO se pudo anunciar. Causas habituales:")
-        print("  - BlueZ sin permiso: hay que permitir 'Advertising' en el")
-        print("    adaptador. Se comprueba con:  bluetoothctl list")
-        print("  - El adaptador no soporta advertising (faltaría 'peripheral'")
-        print("    en 'supported settings').")
+        print(f"\nNO se pudo anunciar: {anuncio.ultimo_error}")
+        print("\nCausas habituales:")
+        print("  - BlueZ sin permiso de advertising. Se comprueba con:")
+        print("      bluetoothctl list")
+        print("    y debe poner 'Supported' incluyendo 'peripheral'.")
+        print("  - El adaptador no soporta advertising.")
         print("  - Ya hay demasiados anunciantes activos.")
-        print("\nVer el detalle con:")
-        print("  BLUEZ_ADAPTER=hci0 .venv/bin/python tools/probe_advertise.py -v")
         await anuncio.stop()
         return 1
 

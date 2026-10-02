@@ -124,6 +124,8 @@ class Advertiser:
         self._bus = None
         self._proxy = None
         self._ruta: str | None = None
+        #: Último error, para poder informar sin que haya que ir al log.
+        self.ultimo_error: str | None = None
         #: `True` si el peer_id fue al scan response, `False` si cayó al
         #: paquete de advertising.
         self.en_scan_response = False
@@ -146,15 +148,26 @@ class Advertiser:
             raiz = obj.get_interface("org.freedesktop.DBus.ObjectManager")
 
             # Buscar el adaptador pedido entre los que BlueZ expone.
+            # `GetManagedObjects` devuelve un **dict** ruta -> interfaces, así
+            # que hay que iterar `.items()`: recorrerlo a pelo daría las claves y
+            # `for ruta, interfaces` fallaría al desempaquetar cada string.
             hci = None
-            for ruta, interfaces in await raiz.call_get_managed_objects():
+            nombres: list[str] = []
+            for ruta, interfaces in (await raiz.call_get_managed_objects()).items():
                 if IFACE_MANAGER not in interfaces:
                     continue
-                if os.path.basename(ruta.rstrip("/")) == self._adaptador:
+                nombre = os.path.basename(ruta.rstrip("/"))
+                nombres.append(nombre)
+                if nombre == self._adaptador:
                     hci = ruta
-                    break
+            nombre_adaptadores = nombres
             if hci is None:
                 log.error("no se encuentra el adaptador %s", self._adaptador)
+                self.ultimo_error = (
+                    f"el adaptador {self._adaptador!r} no expone "
+                    f"{IFACE_MANAGER}. Adaptadores que BlueZ sí expone: "
+                    f"{sorted(nombre_adaptadores)}"
+                )
                 return False
 
             self._ruta = f"/{NOMBRE_SERVICIO}/advertisement"
@@ -176,8 +189,9 @@ class Advertiser:
                 "scan response" if self.en_scan_response else "advertising",
             )
             return True
-        except Exception:
+        except Exception as exc:
             log.exception("fallo al anunciar")
+            self.ultimo_error = f"{type(exc).__name__}: {exc}"
             await self.stop()
             return False
 
