@@ -195,22 +195,52 @@ MAX_PADDING_LENGTH = 255
 
 
 def should_pad_for_ble(msg_type: int) -> bool:
-    """Política de relleno BLE actual.
+    """Política de relleno BLE, según `BLEPacketPaddingPolicy.kt`.
 
-    Fuente: `BLEPacketPaddingPolicy.kt`, *"only Noise frames are padded over
-    BLE"*, alineado con iOS.
+    Traduce literalmente:
 
-    ⚠️ `bitchat-tui` rellena **todo** a cubos (`packet_creation.rs`), y sus
-    vectores de 2025 muestran un `Announce` de 256 B con 39 B reales. Con apps
-    actuales eso ya no ocurre: sólo se rellenan las tramas Noise.
+        MessageType.NOISE_ENCRYPTED, NOISE_HANDSHAKE -> true
+        else -> false
+
+    Y es lo que la app pasa a `toBinaryData(padding = ...)` en
+    `BluetoothPacketBroadcaster.kt:215, 237, 350`.
+
+    ## Aviso: contradicción sin resolver con el tráfico real
+
+    El 2026-10-02 se capturaron paquetes de la app Android que **sí** vienen
+    rellenados, y no son tramas Noise:
+
+    | Paquete | Tipo        | Contenido | Relleno | Byte         |
+    |---------|-------------|-----------|---------|--------------|
+    | 1       | ANNOUNCE    | 166 B     | 90 B    | `0x5a` = 90  |
+    | 2       | MESSAGE     | 96 B      | 160 B   | `0xa0` = 160 |
+
+    El relleno es PKCS#7 exacto: la longitud del relleno **es** el valor del
+    byte, y el total cae en el siguiente cubo. No es basura ni resto de buffer.
+
+    Pero por esas rutas, para un ANNOUNCE la política da `false` y no debería
+    haber relleno. Hay tres salidas posibles y **ninguna comprobada**:
+
+    1. Esos paquetes salieron por una ruta distinta de las tres del broadcaster.
+    2. `toBinaryData` rellena igual, o hay otro relleno aguas arriba.
+    3. La política no es lo que dice su nombre y hay que releerla.
+
+    **No se cambia el comportamiento con una observación que no se explica.**
+    La función sigue reflejando el código, que es lo verificable, y el conflicto
+    queda escrito aquí. Cuando se sepa de dónde salieron esos paquetes se
+    corrige, con la explicación al lado.
+
+    Lo que sí está confirmado contra tráfico real es el relleno *cuando lo hay*:
+    `pkcs7_pad_to_bucket` produce byte a byte los mismos 0x5a y 0xa0.
+
+    Nota: `bitchat-tui` rellenaba **todo** a cubos (`packet_creation.rs`) y sus
+    vectores de 2025 muestran un announce de 256 B con 39 reales.
     """
     try:
         mt = MessageType(msg_type)
     except ValueError:
         return False
     return mt in (MessageType.NOISE_ENCRYPTED, MessageType.NOISE_HANDSHAKE)
-
-
 # --------------------------------------------------------------------------
 # Fragmentación
 # --------------------------------------------------------------------------

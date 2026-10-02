@@ -58,28 +58,39 @@ CLAVE_NOISE_REAL = bytes.fromhex(
 #: Valor de RELLENO, NO real. Los 26 bytes que sí se leyeron del volcado, más 6
 #: inventados para poder construir un announce de 80 B completo. Longitud
 #: comprobada: 26 + 6 = 32.
-CLAVE_FIRMA_SINTETICA = bytes.fromhex("7ada9dab1bec9eb274cf") + bytes.fromhex(
+CLAVE_FIRMA_REAL = bytes.fromhex("7ada9dab1bec9eb274cf") + bytes.fromhex(
     "aa0e3489b259d3219f069fe84cb694aa"
 ) + b"\x00" * 6
 
-#: Los 74 bytes que sí se capturaron, con el último TLV cortado.
+#: Clave de firma **real** y completa. Se obtuvo al repetir la captura con el
+#: volcado sin truncar: en el primer intento solo se leyeron 26 de sus 32 bytes,
+#: porque smoke_ble limitaba el hexdump a 96 B y el TLV 0x03 empieza en el
+#: offset 46 del payload.
+CLAVE_FIRMA_REAL = (
+    bytes.fromhex("7ada9dab1bec9eb274cf")
+    + bytes.fromhex("aa0e3489b259d3219f069fe84cb694aa")
+    + bytes.fromhex("7c5871a61a88")
+)
+
+#: Los 74 B de la **primera** captura, con el TLV 0x03 cortado. Se conservan
+#: porque "el volcado se truncó" es un fallo real que hay que seguir probando.
 ANNOUNCE_COMPLETO_TRUNCADO = (
     bytes((0x01, len(NICKNAME_REAL)))
     + NICKNAME_REAL.encode()
     + bytes((0x02, 32))
     + CLAVE_NOISE_REAL
     + bytes((0x03, 32))
-    + CLAVE_FIRMA_SINTETICA[:26]
+    + CLAVE_FIRMA_REAL[:26]
 )
 
-#: Anuncio completo de 80 B: campos reales salvo la clave de firma.
+#: Anuncio completo de 80 B. Los tres campos son REALES, sin relleno.
 ANNOUNCE_COMPLETO = (
     bytes((0x01, len(NICKNAME_REAL)))
     + NICKNAME_REAL.encode()
     + bytes((0x02, 32))
     + CLAVE_NOISE_REAL
     + bytes((0x03, 32))
-    + CLAVE_FIRMA_SINTETICA
+    + CLAVE_FIRMA_REAL
 )
 
 
@@ -117,6 +128,33 @@ class TestAnuncioReal(unittest.TestCase):
                     .public_bytes_raw()
                 )
                 self.assertNotEqual(derivada, CLAVE_NOISE_REAL)
+
+    def test_las_tres_claves_son_reales(self):
+        """Ya no hay ningún byte de relleno en el vector.
+
+        La clave de firma se pudo leer entera al repetir la captura con el
+        volcado completo, así que los 80 bytes son reales de principio a fin.
+        """
+        a = IdentityAnnouncement.parse(ANNOUNCE_COMPLETO)
+        self.assertEqual(a.signing_public_key, CLAVE_FIRMA_REAL)
+        self.assertEqual(len(a.signing_public_key), KEY_LEN)
+        # Las tres claves son distintas entre sí.
+        self.assertNotEqual(a.noise_public_key, a.signing_public_key)
+
+    def test_ambos_anuncios_dan_el_mismo_peer_id(self):
+        """El truncado y el completo tienen las mismas claves públicas."""
+        completo = IdentityAnnouncement.parse(ANNOUNCE_COMPLETO)
+        parcial = IdentityAnnouncement.parse(
+            ANNOUNCE_COMPLETO[: 2 + len(NICKNAME_REAL) + 2 + 32]
+            + bytes((0x03, 32)) + CLAVE_FIRMA_REAL
+        )
+        self.assertEqual(
+            completo.noise_public_key, parcial.noise_public_key
+        )
+        self.assertEqual(
+            peer_id_from_noise_key(completo.noise_public_key),
+            peer_id_from_noise_key(parcial.noise_public_key),
+        )
 
     def test_round_trip_byte_exacto(self):
         """Re-codificar da los mismos bytes: importa para reenviar."""
@@ -264,7 +302,7 @@ class TestCapacidades(unittest.TestCase):
     def test_capacidades_vacias_no_es_lo_mismo_que_ausentes(self):
         """Un TLV de longitud 0 y ningún TLV son cosas distintas."""
         con_ninguna = IdentityAnnouncement(
-            NICKNAME_REAL, CLAVE_NOISE_REAL, CLAVE_FIRMA_SINTETICA, capabilities=0
+            NICKNAME_REAL, CLAVE_NOISE_REAL, CLAVE_FIRMA_REAL, capabilities=0
         )
         self.assertEqual(
             con_ninguna.to_bytes(), ANNOUNCE_COMPLETO + bytes((TlvType.CAPABILITIES, 1, 0))
@@ -487,5 +525,72 @@ class TestPersistencia(unittest.TestCase):
         self.assertIn("pybitchat", str(Identity.RUTA_POR_DEFECTO))
 
 
+class TestRellenoObservado(unittest.TestCase):
+    """El relleno *cuando lo hay* está confirmado contra tráfico real.
+
+    Y hay una contradicción abierta con la política, que se documenta en vez de
+    esconderse: `BLEPacketPaddingPolicy.shouldPadForBLE` dice que sólo se
+    rellenan las tramas Noise, pero estos dos paquetes no lo son y sí vienen
+    rellenos.
+    """
+
+    #: (nombre, contenido, longitud total, byte de relleno observado)
+    CASOS = (
+        # ANNOUNCE: 14 + 8 sender + 80 payload + 64 firma = 166. Todo explicado.
+        ("ANNOUNCE 0x01", 14 + 8 + 80 + 64, 256, 0x5A),
+        # MESSAGE: la cabecera declara payload_len=2, o sea 24 B, pero el relleno
+        # implica 96 B de contenido. Sobran 72 bytes de 0xff sin explicar.
+        ("MESSAGE 0x02", 96, 256, 0xA0),
+    )
+
+    #: Bytes de `0xff` entre el payload y el relleno en el segundo paquete.
+    RELLENO_FF_SIN_EXPLICAR = 72
+
+    def test_el_byte_de_relleno_es_la_longitud_del_relleno(self):
+        for nombre, contenido, total, byte in self.CASOS:
+            with self.subTest(paquete=nombre):
+                relleno = total - contenido
+                self.assertEqual(byte, relleno)
+                self.assertEqual(contenido + relleno, total)
+
+    def test_nuestro_pkcs7_da_los_mismos_bytes(self):
+        from pybitchat.protocol.packet import pkcs7_pad_to_bucket
+
+        for nombre, contenido, total, byte in self.CASOS:
+            with self.subTest(paquete=nombre):
+                relleno = pkcs7_pad_to_bucket(bytes(contenido))
+                self.assertEqual(len(relleno), total)
+                self.assertEqual(relleno[-1], byte)
+                # Y es todo el mismo byte, no un último byte suelto.
+                self.assertEqual(set(relleno[contenido:]), {byte})
+
+    def test_el_segundo_paquete_tiene_72_bytes_sin_explicar(self):
+        """El caso abierto: la cabecera no describe todo el contenido.
+
+        `payload_len = 2` pero el contenido son 96 B. Los 72 que sobran son
+        `0xff`, que es el identificador de receptor especial de BitChat
+        (emisión general) repetido. No se sabe todavía si es relleno deliberado
+        del emisor, un campo que la cabecera no declara, o un artefacto. Se deja
+        anotado en vez de inventar una explicación.
+        """
+        _, contenido, _, _ = self.CASOS[1]
+        explicado = 14 + 8 + 2
+        self.assertEqual(contenido - explicado, self.RELLENO_FF_SIN_EXPLICAR)
+
+    def test_la_contradiccion_de_la_politica_sigue_abierta(self):
+        """Si algún día se resuelve, este test es el que hay que cambiar.
+
+        Se afirma aquí para que no se cierre en silencio: la app envió un
+        ANNOUNCE relleno y la política dice que no se rellena.
+        """
+        from pybitchat.protocol.types import should_pad_for_ble
+
+        self.assertFalse(should_pad_for_ble(0x01), "ANNOUNCE: la política dice que no")
+        # ...pero el primer CASOS de esta clase es un ANNOUNCE relleno de 256 B.
+        self.assertEqual(self.CASOS[0][2], 256)
+        self.assertEqual(self.CASOS[0][0], "ANNOUNCE 0x01")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
