@@ -128,7 +128,9 @@ async def principal(args: argparse.Namespace) -> int:
         recibidos.append(datos)
         print(f"\n--- paquete recibido: {len(datos)} B "
               f"(nº {len(recibidos)}) ---")
-        print(hexdump(datos[:96]))
+        # Volcado **completo**. Antes se truncaba a 96 B, que es justo lo que
+        # dejó incompleta la clave de firma del announce en la primera captura.
+        print(hexdump(datos))
         try:
             p = Packet.from_bytes(datos)
             print(f"    tipo={p.header.type_name}  ttl={p.header.ttl}  "
