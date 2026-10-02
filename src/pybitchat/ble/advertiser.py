@@ -214,6 +214,19 @@ class Advertiser:
 
         BlueZ no anuncia nada hasta que este objeto existe. Sin él,
         `RegisterAdvertisement` falla.
+
+        ## La firma del método
+
+        `dbus_fast.service.method` **no puede deducirla** de un método sin
+        argumentos y sin valor de retorno: falla con
+
+            TypeError: Argument 'signature' has incorrect type
+            (expected str, got NoneType)
+
+        La convención de dbus-fast (igual que dbus-next) es que **la firma
+        D-Bus va en la anotación de retorno**, y que un método que no devuelve
+        nada se declara con la cadena vacía. De ahí el `-> ""`, que no es
+        decorativo: sin él el decorador aborta.
         """
         from dbus_fast.service import ServiceInterface, method
 
@@ -222,7 +235,7 @@ class Advertiser:
                 super().__init__(IFACE_ADVERTISEMENT)
 
             @method()
-            async def Release(self) -> None:  # noqa: N802 - nombre de BlueZ
+            async def Release(self) -> "":  # noqa: N802, E704 - firma D-Bus vacía
                 log.info("BlueZ liberó el anuncio")
 
         self._bus.export(f"/{NOMBRE_SERVICIO}", _Anuncio())
