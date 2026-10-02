@@ -83,19 +83,30 @@ def construir_announce(nickname: str, ttl: int = 3) -> bytes:
     return Packet(header=cabecera, sender_id=SENDER_ID, payload=carga).to_bytes()
 
 
+def contar_uuids(anuncios: dict) -> int:
+    """Suma los UUID de servicio de todos los dispositivos vistos.
+
+    Vive fuera de `resolver_telefono` para poder probarse sin `bleak` ni
+    adaptador. Existe además por una razón práctica: si el recuento sale a
+    cero, el problema no es el teléfono sino que el adaptador no está
+    escaneando, y eso cambia por completo la diagnóstico.
+    """
+    return sum(len(adv.service_uuids or ()) for _dev, adv in anuncios.values())
+
+
 async def resolver_telefono(timeout: float):
     """Busca el teléfono por UUID de servicio, sin cachear direcciones."""
     from bleak import BleakScanner
 
     print(f"buscando el teléfono (announce {SENDER_ID.hex()})…")
     encontrados = await BleakScanner.discover(timeout=timeout, return_adv=True)
-    vistos = sum(len(v.service_uuids or ()) for _, v in
-                 ((d, a) for _, (d, a) in encontrados.values()))
-    print(f"  {len(encontrados)} dispositivos, {vistos} UUID de servicio")
+    print(f"  {len(encontrados)} dispositivos, {contar_uuids(encontrados)} UUID de servicio")
     for mac, (dev, adv) in encontrados.items():
         if any(es_nuestro_servicio(u) for u in (adv.service_uuids or [])):
             print(f"  encontrado: {mac}  rssi={adv.rssi}")
             return mac, dev, adv
+    if not encontrados:
+        print("  el adaptador no vio NADA: no es el teléfono")
     return None
 
 

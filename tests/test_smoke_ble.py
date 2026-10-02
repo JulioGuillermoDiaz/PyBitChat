@@ -90,6 +90,40 @@ class TestConstruirAnnounce(unittest.TestCase):
         self.assertLess(diferencia, 60, "el timestamp debe ser actual")
 
 
+class TestContarUuids(unittest.TestCase):
+    """El recuento distingue "no aparece el teléfono" de "no escanea nada".
+
+    Es la diferencia entre depurar el móvil y depurar el adaptador, así que
+    merece estar probado sin necesidad del hardware.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.smoke = _cargar_smoke()
+
+    class _Adv:
+        def __init__(self, uuids):
+            self.service_uuids = uuids
+
+    def _ann(self, por_dispositivo):
+        return {
+            f"AA:BB:CC:DD:EE:{i:02X}": (object(), self._Adv(u))
+            for i, u in enumerate(por_dispositivo)
+        }
+
+    def test_vacio(self):
+        self.assertEqual(self.smoke.contar_uuids({}), 0)
+
+    def test_cuenta_todos(self):
+        ann = self._ann([["a"], ["b", "c"], []])
+        self.assertEqual(self.smoke.contar_uuids(ann), 3)
+
+    def test_service_uuids_a_none_no_revienta(self):
+        """bleak puede devolver `None` si el anuncio no trae UUID."""
+        ann = self._ann([None, ["a"], []])
+        self.assertEqual(self.smoke.contar_uuids(ann), 1)
+
+
 class TestHexdump(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
