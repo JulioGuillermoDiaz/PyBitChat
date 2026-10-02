@@ -464,6 +464,53 @@ class TestGatt(unittest.TestCase):
         self.assertEqual(gatt.PEER_ID_SIZE, 8)
 
 
+class TestComparacionDeUuid(unittest.TestCase):
+    """El bug que costó un rato de diagnóstico: comparar UUID como texto.
+
+    `uuid.UUID.hex` devuelve 32 caracteres sin guiones; `str(uuid)` devuelve 36
+    con guiones. bleak entrega los UUID del anuncio con guiones, así que
+    comparar contra `.hex` **no puede coincidir nunca** y el descubrimiento se
+    queda mudo.
+    """
+
+    def test_hex_y_str_difieren(self):
+        """Documenta el mecanismo, para que el test siguiente tenga sentido."""
+        self.assertEqual(len(gatt.SERVICE_UUID.hex), 32)
+        self.assertNotIn("-", gatt.SERVICE_UUID.hex)
+        self.assertEqual(len(str(gatt.SERVICE_UUID)), 36)
+        self.assertIn("-", str(gatt.SERVICE_UUID))
+        self.assertNotEqual(gatt.SERVICE_UUID.hex.upper(), str(gatt.SERVICE_UUID).upper())
+
+    def test_comparar_contra_hex_falla(self):
+        """La forma que estaba mal, comprobada para que no vuelva."""
+        con_guiones = str(gatt.SERVICE_UUID)
+        self.assertNotIn(con_guiones.upper(), {gatt.SERVICE_UUID.hex.upper()})
+
+    def test_reconoce_el_formato_del_anuncio(self):
+        """Así es como llega de bleak: con guiones."""
+        self.assertTrue(gatt.es_nuestro_servicio(str(gatt.SERVICE_UUID)))
+        self.assertTrue(gatt.es_nuestro_servicio(str(gatt.SERVICE_UUID).upper()))
+        self.assertTrue(gatt.es_nuestro_servicio(str(gatt.SERVICE_UUID).lower()))
+
+    def test_reconoce_tambien_el_objeto_uuid(self):
+        import uuid
+
+        self.assertTrue(gatt.es_nuestro_servicio(gatt.SERVICE_UUID))
+        self.assertTrue(gatt.es_nuestro_servicio(uuid.UUID(gatt.SERVICE_UUID.hex)))
+
+    def test_no_confunde_el_testnet(self):
+        """El testnet se parece mucho: mismo UUID salvo el último carácter."""
+        self.assertNotEqual(
+            str(gatt.SERVICE_UUID_TESTNET), str(gatt.SERVICE_UUID)
+        )
+        self.assertFalse(gatt.es_nuestro_servicio(str(gatt.SERVICE_UUID_TESTNET)))
+
+    def test_basura_no_revienta(self):
+        for basura in (None, "", "no-es-un-uuid", 42, b"\xff\xfe", []):
+            with self.subTest(valor=basura):
+                self.assertFalse(gatt.es_nuestro_servicio(basura))
+
+
 # --------------------------------------------------------------------------
 # Transporte
 # --------------------------------------------------------------------------

@@ -34,7 +34,7 @@ sys.path.insert(0, str(RAIZ / "src"))
 
 from pybitchat.ble.gatt import (  # noqa: E402
     CHARACTERISTIC_UUID,
-    SERVICE_UUID,
+    es_nuestro_servicio,
 )
 from pybitchat.protocol.packet import Packet, PacketHeader  # noqa: E402
 from pybitchat.protocol.payloads import decode_payload, CURRENT  # noqa: E402
@@ -89,10 +89,11 @@ async def resolver_telefono(timeout: float):
 
     print(f"buscando el teléfono (announce {SENDER_ID.hex()})…")
     encontrados = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    vistos = sum(len(v.service_uuids or ()) for _, v in
+                 ((d, a) for _, (d, a) in encontrados.values()))
+    print(f"  {len(encontrados)} dispositivos, {vistos} UUID de servicio")
     for mac, (dev, adv) in encontrados.items():
-        if SERVICE_UUID.hex.upper() in {
-            str(u).upper() for u in (adv.service_uuids or [])
-        }:
+        if any(es_nuestro_servicio(u) for u in (adv.service_uuids or [])):
             print(f"  encontrado: {mac}  rssi={adv.rssi}")
             return mac, dev, adv
     return None

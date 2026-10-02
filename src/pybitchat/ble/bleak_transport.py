@@ -75,7 +75,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
 from ..mesh.transport import PEER_ID_SIZE, Peer, Transport, TransportError
-from .gatt import CHARACTERISTIC_UUID, SERVICE_UUID
+from .gatt import CHARACTERISTIC_UUID, SERVICE_UUID, es_nuestro_servicio
 
 log = logging.getLogger(__name__)
 
@@ -226,8 +226,13 @@ class BleakTransport(Transport):
 
     @staticmethod
     def _anunciado(mac: str, adv) -> bool:
-        wanted = SERVICE_UUID.hex.upper()
-        return any(str(u).upper() == wanted for u in (adv.service_uuids or []))
+        """¿Anuncia este par el servicio de BitChat?
+
+        Delega en `es_nuestro_servicio`, que compara UUID y no texto. Comparar
+        contra `SERVICE_UUID.hex` **nunca coincide**: `.hex` va sin guiones y el
+        anuncio los lleva.
+        """
+        return any(es_nuestro_servicio(u) for u in (adv.service_uuids or []))
 
     def _known_peer(self, mac: str) -> bytes | None:
         return self._mac_a_peer.get(mac)

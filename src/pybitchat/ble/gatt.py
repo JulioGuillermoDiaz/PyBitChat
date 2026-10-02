@@ -67,6 +67,27 @@ CHARACTERISTIC_UUID = _uuid.UUID(BITCHAT_CHARACTERISTIC_UUID)
 #: CCCD estándar de Bluetooth, para habilitar notificaciones. No es de BitChat.
 DESCRIPTOR_UUID = _uuid.UUID("00002902-0000-1000-8000-00805f9b34fb")
 
+
+def es_nuestro_servicio(valor: object) -> bool:
+    """¿Este UUID del anuncio es el de BitChat?
+
+    Compara **como UUID**, no como texto. Es la diferencia entre funcionar y no
+    funcionar: `uuid.UUID.hex` devuelve 32 caracteres sin guiones y `str(uuid)`
+    devuelve 36 con guiones, así que comparar cualquiera de los dos contra el
+    otro falla siempre.
+
+    No es un detalle teórico: con la comparación por texto, el descubrimiento se
+    quedaba mudo y parecía que el teléfono había desaparecido. Comparar
+    `UUID(...)` normaliza ambos formatos y hace la pregunta correcta.
+
+    `valor` llega de bleak como `str`, `UUID` o, en alguna versión, como bytes
+    little-endian; por eso el `try` y no una aserción.
+    """
+    try:
+        return _uuid.UUID(str(valor)) == SERVICE_UUID
+    except (ValueError, AttributeError, TypeError):
+        return False
+
 #: Tamaño del campo de identidad de peer, en bytes. Reexportado de `types.py`
 #: para que quien use sólo el paquete `ble` no tenga que importar el protocolo.
 PEER_ID_SIZE = _PEER_ID_SIZE
@@ -103,4 +124,5 @@ __all__ = [
     "SERVICE_UUID",
     "SERVICE_UUID_TESTNET",
     "STALE_PEER_TIMEOUT_MS",
+    "es_nuestro_servicio",
 ]
