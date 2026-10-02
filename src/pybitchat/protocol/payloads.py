@@ -49,10 +49,12 @@ from .message import MessagePayload, UnsupportedPayloadField
 from .packet import ProtocolError, Reader
 from .tlv import FileTransferPayload, RequestSyncPayload
 from .types import (
+    HEADER_SIZE,
     LEGACY_FRAGMENT_CHUNK_SIZE,
     MAX_FRAGMENT_SIZE,
     MAX_FRAGMENTS_PER_ID,
     NOISE_TRANSPORT_NONCE_PREFIX_LEN,
+    PEER_ID_SIZE,
     LegacyMessageType,
     MessageType,
 )
@@ -199,25 +201,109 @@ class FragmentPayload:
         return self.index == self.total - 1
 
 
+#: Margen que la app reserva para el relleno (`FragmentManager.kt:104`).
+#:
+#: `MessagePadding.optimalBlockSize` mete el paquete en el siguiente cubo, y
+#: este margen absorbe lo que el cálculo no puede saber de antemano.
+PADDING_RESERVE = 16
+
+#: Bloque de transporte al que se ajusta cada fragmento
+#: (`AppConstants.Fragmentation.FRAGMENT_SIZE_THRESHOLD`).
+TRANSPORT_BLOCK = 512
+
+
+def max_fragment_data_size(*, has_recipient: bool = False, hops: int = 0) -> int:
+    """Bytes de datos del paquete original que caben en un fragmento.
+
+    Reproduce el cálculo de `FragmentManager.createFragments` (`:106-108`):
+
+        overhead = cabecera + sender + [recipient] + [ruta]
+                  + cabecera_de_fragmento + margen_de_relleno
+        datos = min(512 - overhead, MAX_FRAGMENT_SIZE)
+
+    El margen de relleno no es opcional: `MessagePadding.optimalBlockSize`
+    mete el paquete en el siguiente cubo, y sin reservarlo el fragmento se pasa
+    de largo y salta al cubo de 1024.
+
+    ## Por qué no basta con `MAX_FRAGMENT_SIZE`
+
+    Sin destinatario ni ruta, el total del fragmento queda en
+    `14 + 8 + 469 = 491` y sobra margen de sobra. El problema aparece con la
+    **ruta**: cada salto añade `1 + 8 × saltos` bytes al sobre, y
+    `MAX_FRAGMENT_SIZE` es una constante fija que no los contempla. Con seis
+    saltos el fragmento mide 548 B y el relleno lo empuja a 1024, con lo que
+    cada fragmento pasa a costar el doble de lo previsto. Reduciendo los datos
+    en función de la ruta, como hace la app, el bloque se respeta siempre.
+
+    ⚠️ La app usa 13 para el tamaño de cabecera y el real es 14
+    (`FragmentManager.kt:98` contra `BinaryProtocol.kt:208`). Aquí se usa 14:
+    un byte de más de margen sólo hace el fragmento ligeramente más
+    conservador, y equivocarse al revés sí desbordaría el bloque.
+    """
+    overhead = (
+        HEADER_SIZE
+        + PEER_ID_SIZE
+        + (PEER_ID_SIZE if has_recipient else 0)
+        + (1 + hops * PEER_ID_SIZE if hops else 0)
+        + FragmentPayload.HEADER_SIZE
+        + PADDING_RESERVE
+    )
+    datos = min(TRANSPORT_BLOCK - overhead, MAX_FRAGMENT_SIZE)
+    if datos <= 0:
+        raise ValueError(
+            f"la ruta deja sin sitio para datos: el sobre se come "
+            f"{overhead} B de un bloque de {TRANSPORT_BLOCK} B"
+        )
+    return datos
+
+
+def max_fragment_payload_size(*, has_recipient: bool = False, hops: int = 0) -> int:
+    """Tamaño total del payload de fragmento, cabecera de fragmento incluida.
+
+    Es `max_fragment_data_size` más `FragmentPayload.HEADER_SIZE`, acotado por
+    `MAX_FRAGMENT_SIZE`.
+    """
+    return min(
+        max_fragment_data_size(has_recipient=has_recipient, hops=hops)
+        + FragmentPayload.HEADER_SIZE,
+        MAX_FRAGMENT_SIZE,
+    )
+
+
 def split_into_fragments(
     padded_packet: bytes,
     mtype: int,
     fragment_id: bytes | None = None,
-    chunk_size: int = MAX_FRAGMENT_SIZE,
+    *,
+    chunk_size: int | None = None,
+    has_recipient: bool = False,
+    hops: int = 0,
 ) -> list[bytes]:
     """Trocea un paquete ya rellenado en payloads de fragmento.
 
     `padded_packet` debe incluir el relleno: los fragmentos cortan el paquete
     final tal cual va a ir, y el receptor lo reensambla y descifra después.
 
-    `chunk_size` por defecto es `MAX_FRAGMENT_SIZE` (469 B, valor del dialecto
-    actual). `bitchat-tui` usaba 150 B porque venía ajustado al MTU de iOS
-    (185); ese valor es un tercer dialecto y no debe usarse salvo como
-    reserva conservadora cuando el MTU real sea desconocido.
+    `chunk_size` es el tamaño **total** de cada payload de fragmento, cabecera
+    incluida. Si se omite se calcula con `max_fragment_payload_size()`, que
+    descuenta el sobre real del bloque de 512.
+
+    **Pasa `has_recipient=True` y `hops=N` para mensajes privados y enrutados.**
+    Sin eso se usaría el sobre de un fragmento sin destino ni ruta, que es
+    menor que el real, y con rutas largas el fragmento se saldría del bloque.
+
+    `bitchat-tui` usaba 150 B porque venía ajustado al MTU de iOS (185); ese
+    valor es un tercer dialecto y no debe usarse salvo como reserva
+    conservadora cuando el MTU real sea desconocido.
 
     ⚠️ No producir más de `MAX_FRAGMENTS_PER_ID` (256) fragmentos por conjunto:
     el receptor los rechaza y el mensaje queda inentregable.
     """
+    if chunk_size is None:
+        chunk_size = max_fragment_payload_size(
+            has_recipient=has_recipient, hops=hops
+        )
+
     if chunk_size <= FragmentPayload.HEADER_SIZE:
         raise ValueError(
             f"chunk_size debe superar la cabecera de fragmento "
@@ -458,8 +544,12 @@ __all__ = [
     "OPAQUE_BY_DIALECT",
     "OPAQUE_TYPES",
     "OpaquePayload",
+    "PADDING_RESERVE",
     "RESOLVED_QUESTIONS",
+    "TRANSPORT_BLOCK",
     "decode_payload",
+    "max_fragment_data_size",
+    "max_fragment_payload_size",
     "open_question_for",
     "split_into_fragments",
 ]

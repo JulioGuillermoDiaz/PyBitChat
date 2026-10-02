@@ -26,7 +26,8 @@ $env:PYTHONIOENCODING='utf-8'
 | `tests/test_noise_vectors.py` | 39 | Handshake XX, framing, anti-replay |
 | `tests/test_current_payloads.py` | 44 | `MESSAGE`, TLV, voz |
 | `tests/test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad |
-| **Total** | **167** | **todos en verde** |
+| `tests/test_transport.py` | 71 | Compresión, reensamblado, GATT, transporte |
+| **Total** | **238** | **todos en verde** |
 
 Detalle importante del entorno: **PowerShell destroza los `python -c` en línea
 con llaves y comillas**. Para scripts de un solo uso, escribir un fichero y
@@ -53,17 +54,22 @@ Lo único que se conserva de esa fuente son los vectores ya extraídos, en
 | 1.5 | Dialecto: constantes Android con procedencia | ✅ |
 | 3 | Noise XX handshake + transporte + anti-replay | ✅ |
 | — | Payloads del dialecto actual (`MESSAGE`, TLV, voz) | ✅ |
-| 2 | **Integración BLE** | ❌ bloqueada, ver §4 |
+| **2a** | **Compresión, reensamblado, GATT, transporte inyectable** | ✅ |
+| 2b | `ble/bleak_transport.py` y enlace real | ❌ necesita hardware |
 
 Ficheros con el detalle de cada decisión:
 
 - `src/pybitchat/protocol/types.py` — los dos enums (`MessageType` actual,
   `LegacyMessageType` retirado), constantes, vectores de Noise.
-- `src/pybitchat/protocol/packet.py` — cabecera de **14** bytes.
-- `src/pybitchat/protocol/payloads.py` — despacho y registro de huecos.
+- `src/pybitchat/protocol/packet.py` — cabecera de **14** bytes, compresión y `WirePayload`.
+- `src/pybitchat/protocol/payloads.py` — despacho, registro de huecos, tamaño de fragmento.
+- `src/pybitchat/protocol/compression.py` — DEFLATE crudo y guardas anti zip-bomb.
+- `src/pybitchat/protocol/reassembly.py` — receptor de fragmentos.
+- `src/pybitchat/ble/gatt.py` — UUIDs GATT y constantes de peers.
+- `src/pybitchat/mesh/transport.py` — `Transport` abstracto y `MockTransport`.
 - `src/pybitchat/protocol/message.py`, `tlv.py`, `voice.py` — payloads actuales.
 - `src/pybitchat/noise/session.py`, `framing.py`, `primitives.py` — Noise.
-- `EVALUACION-MIGRACION.md` — informe de 795 líneas, 14 secciones.
+- `EVALUACION-MIGRACION.md` — informe de 939 líneas, 14 secciones.
 
 ---
 
@@ -103,6 +109,24 @@ Ficheros con el detalle de cada decisión:
 8. La cabecera es de **14** bytes (`BinaryProtocol.kt:208-217`), no de 13 como
    dicen el README de Android y el propio `bitchat-tui`.
 
+9. **DEFLATE crudo, sin cabeceras zlib** (`wbits=-15` en Python). Con el valor
+   por defecto de `zlib` se meterían 2 bytes que el receptor no puede
+   descomprimir. Al leer sí se toleran ambas formas, como la app.
+
+10. **Nunca re-comprimir un payload ajeno.** La salida de DEFLATE no es
+    canónica: Java y Python dan bytes distintos para la misma entrada, y como la
+    verificación de firma re-codifica el paquete, re-comprimir rompería una
+    firma válida. Por eso existe `WirePayload`. Android explica el porqué en
+    `BinaryProtocol.kt:43-46`.
+
+11. **El tamaño de fragmento no es `MAX_FRAGMENT_SIZE`.** Es `512 - overhead`,
+    descontando el sobre real. Sin ruta da 469, pero con rutas largas el fijo se
+    queda corto y el relleno empuja cada fragmento al cubo de 1024.
+
+12. **Sólo v1.** Android acepta v1 y v2 pero emite siempre v1
+    (`BitchatPacket.version = 1u`). `packet.py` rechaza v2 con un error propio
+    (`UnsupportedVersionError`) en vez de llamarlo "versión desconocida".
+
 ---
 
 ## 4. Qué queda abierto
@@ -111,17 +135,26 @@ Ficheros con el detalle de cada decisión:
 |-------|-----------|---------|
 | **H1** | 7 paquetes que el Rust envió no tienen volcado hex. Sólo se capturó el tráfico entrante. | Nada crítico |
 | **H2** | *Prologue* de producción sin confirmar contra captura real. | Fase 3 (resto hecho) |
-| **Fase 2** | Integración BLE. | El camino a un cliente real |
+| **Firmas** | `packet.py` detecta `HAS_SIGNATURE` y salta los 64 bytes, pero **no verifica**. Hace falta la clave de identidad Noise de un par. | Nada todavía |
+| **2b** | `ble/bleak_transport.py` y enlace real. | El camino a un cliente real |
 
-### Por qué la Fase 2 está bloqueada aquí
+### Por qué 2b sigue bloqueada aquí
 
 Esta VM es un **guest de VirtualBox sin adaptador Bluetooth** y sin WSL.
 Verificado: sólo `Intel PRO/1000 MT` Ethernet, cero dispositivos PnP de BT, y
-no existen `bluetoothctl`, `btmon` ni `hciconfig`. Las fases 0, 1 y 3 se
-pudieron hacer porque son criptografía y códec puros.
+no existen `bluetoothctl`, `btmon` ni `hciconfig`.
 
-**Hace falta el portátil Linux con el teléfono Android asociado.** Al arrancar
-con BLE, tener en cuenta:
+**Hace falta la máquina Linux con el teléfono Android asociado**, que sí está
+disponible y tiene la app instalada. La parte 2a (compresión, reensamblado,
+GATT, transporte) ya está hecha y probada, así que 2b es escribir
+`ble/bleak_transport.py` y perfilar el enlace real.
+
+Sobre el adaptador: en Windows el Bluetooth interno es casi siempre un
+**dispositivo USB compuesto** (padre genérico con interfaces BT + HID), y por
+eso VirtualBox lo rechaza al filtrar por vendor/product. Un **dongle USB de
+5-10 €** lo esquiva: es un USB plano y cualquier hipervisor lo deja pasar.
+
+Al arrancar con BLE, tener en cuenta:
 
 - MTU: Android 14+ = **517**; BlueZ vía bleak = **23** salvo que se llame a
   `_acquire_mtu()`.
@@ -130,6 +163,9 @@ con BLE, tener en cuenta:
 - El fragmento corta el paquete **ya rellenado**, así que la cabecera de 14 B
   puede quedar partida entre dos fragmentos. El reensamblado concatena bytes a
   secas, sin interpretar nada.
+- BitChat usa **GATT y advertising a la vez**: el advertising hace el
+  dispositivo descubrible, y el GATT mueve los datos. Faltar cualquiera de los
+  dos rompe la malla.
 
 ### Por qué H3, H4 y H5 se descartaron
 
@@ -167,6 +203,31 @@ que faltaban: H6 `REQUEST_SYNC`, H7 `FILE_TRANSFER`, H8 `VOICE_FRAME`, más el
    o sea **u32** (`:87`, y `off += 4` en el decode `:120-123`). Fiarse del
    comentario rompe la interop sólo con ficheros grandes: intermitente y difícil
    de diagnosticar. **El código es el que manda.**
+
+4. **Re-comprimir un payload ajeno rompe las firmas ajenas.** La salida de
+   DEFLATE no es canónica: Java y Python dan bytes distintos para la misma
+   entrada. Como la verificación de firma re-codifica el paquete, el resultado es
+   una firma que deja de validar. Android lo evita con `WirePayload`
+   (`BinaryProtocol.kt:43-46, 527-530`). Sin esto el fallo sólo aparece con
+   mensajes largos **y en un relé real**: intermitente y fácil de atribuir al
+   ruido de la red.
+
+5. **`MAX_FRAGMENT_SIZE` es una constante fija que ignora la ruta.** El cálculo
+   real es `512 - overhead` (`FragmentManager.kt:106-108`). Sin ruta sale 469,
+   pero con saltos el fragmento se sale del bloque y el relleno lo lleva a 1024.
+
+6. **Fallo mío,apyuntado para no repetirlo:** En un test, afirmé que con
+   destinatario los fragmentos se duplicaban a 1024. Era un error aritmético
+   mío por contar la cabecera de fragmento dos veces; sin destino ni ruta el
+   total es 491 y sobra margen. El fallo real es sólo con rutas largas.
+
+7. **`from exc` sólo existe en `raise`,** no en `return`. Escribir
+   `return X(...) from exc` es un error de sintaxis, no un bug de lógica.
+
+8. **El directorio temporal (`%TEMP%`) pierde los caracteres no Latin-1.**
+   Al escribir ahí, los em-dash y los emoji se sustituyen por `-` y `?`. Los
+   ficheros del proyecto no salen intactos: se conservan. Razonable para preparar un
+   trozo de informe, pero hay que comprobar el resultado antes de insertarlo.
 
 ---
 

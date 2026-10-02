@@ -741,6 +741,149 @@ equivocada.
 | `test_current_payloads.py` | 44 | `MESSAGE`, TLV, voz (nuevo) |
 | `test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad (nuevo) |
 
+### 12.8 Fase 2a — la capa que no necesita Bluetooth ✅
+
+La Fase 2 (integración BLE) estaba bloqueada por una VM sin adaptador
+Bluetooth. Al revisar el código se vio que **la mayor parte de esa fase no
+necesita hardware**: el transporte es la única pieza que lo necesita, y todo lo
+demás es lógica pura que se puede probar con un enlace en memoria.
+
+Ficheros nuevos:
+
+| Fichero | Contenido |
+|---------|-----------|
+| `protocol/compression.py` | DEFLATE crudo, heurística de entropía, guardas anti zip-bomb |
+| `protocol/reassembly.py` | Receptor de fragmentos con los límites de `AppConstants` |
+| `ble/gatt.py` | UUIDs GATT y constantes de ciclo de vida de pares |
+| `mesh/transport.py` | Abstracción de transporte + `MockTransport` |
+
+Modificados: `protocol/packet.py` (compresión y `WirePayload`),
+`protocol/payloads.py` (cálculo del tamaño de fragmento).
+
+Resultado: **238 tests en verde**, de los que 71 son nuevos.
+
+#### La bomba de interoperabilidad más importante del proyecto
+
+`BinaryProtocol.kt:38-57` explica por qué existe `WirePayload`, y es un detalle
+que no se puede pasar por alto:
+
+> *DEFLATE output is not canonical and clients use different encoders (java.util.zip.Deflater here, Apple's compression_encode_buffer on iOS), so re-compressing can change the preimage and reject a valid packet.*
+
+El `Deflater` de Java y el `zlib` de Python **no producen los mismos bytes** para
+la misma entrada. Como la verificación de firma re-codifica el paquete para
+reconstruir lo que se firmó, re-comprimir un payload ajeno cambiaría la
+preimagen y **haría que una firma válida dejara de validar**.
+
+Android lo evita guardando los bytes originales del cable en `WirePayload` y
+reusándolos al re-codificar (`BinaryProtocol.kt:527-530` y `:246-250`). El
+mismo mecanismo evita que un relé que decrementa el TTL sustituya la codificación
+de quien originó el paquete (`:46`).
+
+**Sin esto, el fallo sólo aparecería con mensajes largos y en un relé real**:
+intermitente, y atribuible al ruido de la red en lugar de a la implementación.
+
+Implementado como `WirePayload` en `protocol/packet.py`, con `matches()` que
+comprueba que el payload sigue siendo el mismo antes de reusar los bytes.
+
+#### DEFLATE crudo, y por qué importa
+
+`CompressionUtil.kt:48` usa `Deflater(DEFAULT_COMPRESSION, true)`: raw deflate,
+sin cabeceras zlib. En Python, `wbits=-15`. Con el valor por defecto de `zlib`
+(`wbits=15`) se producirían 2 bytes de cabecera que el receptor no puede
+descomprimir.
+
+Para **leer** sí se toleran ambas formas, igual que la app
+(`decompressExact`, `:117-125`): si los bytes parecen zlib, se prueba ese
+formato primero y, si no cuadra exactamente, se cae a raw.
+
+#### Guardas de descompresión
+
+Replicadas de `BinaryProtocol.kt:501-539`, en este orden:
+
+| Guarda | Valor | Qué evita |
+|--------|-------|-----------|
+| Tamaño original en `1..MAX_PAYLOAD_LENGTH` | 1 B – 10 MiB | Reservar memoria absurda |
+| Ratio ≤ 50 000:1 | `MAX_COMPRESSION_RATIO` | Bomba de compresión |
+| La expansión debe medir **exactamente** lo declarado | — | Stream truncado o sobredeclarado |
+| `eof` debe ser cierto | — | Queda salida sin colocar (tamaño subdeclarado) |
+| `unused_data` vacío | — | Bytes basura tras el final del stream |
+
+El ratio se comprueba **antes** de desinflar: es la única barrera útil, porque
+comprobarlo después ya es tarde.
+
+#### Tamaño del fragmento: no es `MAX_FRAGMENT_SIZE`
+
+`FragmentManager.createFragments` (`:106-108`) calcula:
+
+    overhead = cabecera + sender + [recipient] + [ruta]
+              + cabecera_de_fragmento + margen_de_relleno
+    datos = min(512 - overhead, MAX_FRAGMENT_SIZE)
+
+El margen de relleno no es opcional: `MessagePadding.optimalBlockSize` mete el
+paquete en el siguiente cubo, y sin reservarlo el fragmento se pasa de largo.
+
+Sin destinatario ni ruta, el total queda en 469 y sobra margen. El problema
+aparece con la **ruta**: cada salto añade `1 + 8 × saltos` bytes de sobre, y
+`MAX_FRAGMENT_SIZE` es una constante fija que no los contempla. Con seis saltos
+el fragmento mide 548 B y el relleno lo empuja al cubo de 1024, con lo que cada
+fragmento pasa a costar el doble de lo previsto. Implementado como
+`max_fragment_data_size()` y `max_fragment_payload_size()`, con `has_recipient`
+y `hops`.
+
+**Inconsistencia detectada en el propio Android:** `FragmentManager.kt:98` usa
+`headerSize = 13` para v1 y `15` para v2, cuando la cabecera real es 14 y 16
+(`BinaryProtocol.kt:208-209`). Se usa 14 aquí: un byte de más de margen sólo hace
+el fragmento más conservador; equivocarse al revés sí desbordaría el bloque.
+
+> De paso, esto explica probablemente el "13-byte header" del README de Android:
+> alguien leyó esta constante en vez del formato de cable.
+
+#### Validación cruzada de los UUID GATT
+
+Los mismos tres UUID aparecen en dos implementaciones independientes:
+
+- `BLEService.swift` de `permissionlesstech/bitchat` y `data_structures.rs:48`.
+- `util/AppConstants.kt`, sección `Mesh.Gatt`, en la app Android.
+
+Que coincidan no es casualidad: es el mismo protocolo visto desde dos sitios. Se
+documenta en `ble/gatt.py`, que **no los redefine** sino que los toma de
+`protocol/types.py`, y hay un test que compara ambas fuentes para que no se
+separen sin que nadie se entere.
+
+#### Reensamblado de fragmentos
+
+Semántica exacta de `FragmentManager.handleFragment`:
+
+- El reensamblado es **siempre por índice**, nunca por orden de llegada
+  (`:264`). El primer fragmento puede perderse y aun así el resultado debe ser
+  idéntico al original.
+- Si un `fragment_id` llega con otro `total` u otro `originalType` del que se
+  había registrado, se rechaza el fragmento **y se borra el conjunto entero**
+  (`:198-203`). Dos emisores distintos con el mismo id harían que cualquier
+  reensamblado fuese inventado.
+- Un reenvío del mismo índice **sustituye**, no suma: el tamaño acumulado
+  descuenta lo que ya había en esa posición (`:237-238`). Sin esto, un par que
+  reenvía mucho consumiría el límite de 1 MiB sin motivo.
+- `FragmentPayload.isValid()` valida `index < total` (`:127`), que es lo que
+  impide que un índice fuera de rango complete el conjunto con un resultado
+  truncado.
+
+El reloj del reensamblador es inyectable, de modo que el timeout de 30 s se
+prueba sin dormir.
+
+#### Lo que queda para 2b
+
+Hace falta hardware Bluetooth y la máquina Linux con el teléfono asociado.
+Lo pendiente:
+
+- `ble/bleak_transport.py`: `Transport` sobre `bleak` (escaneo, advertisings,
+  GATT con `SERVICE_UUID` y `CHARACTERISTIC_UUID`, escritura al CCCD).
+- Política de reenvío y descubrimiento de pares.
+- Emparejamiento BLE con Android, que es la parte más frágil de toda la
+  operación.
+
+---
+
 ## 13. Anexo: los tres oráculos de validación
 
 ### 13.1 Definición
