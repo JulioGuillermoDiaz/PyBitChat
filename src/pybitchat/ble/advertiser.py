@@ -199,6 +199,9 @@ class Advertiser:
             elif await self._registrar(con_scan_response=False):
                 self.en_scan_response = False
             else:
+                # `ultimo_error` **no** se toca aquí a propósito: guarda lo que
+                # dijo BlueZ, y sobrescribirlo con un texto propio devolvía
+                # `None` y el usuario se quedaba sin diagnóstico.
                 log.error("BlueZ rechazó el anuncio en las dos formas")
                 await self.stop()
                 return False
@@ -216,13 +219,26 @@ class Advertiser:
             return False
 
     async def _registrar(self, *, con_scan_response: bool) -> bool:
+        """Intenta registrar el anuncio. `False` si BlueZ lo rechaza.
+
+        Guarda el motivo del rechazo en `ultimo_error` para que quien llama
+        pueda informar de **por qué**, no sólo de que falló. Los dos intentos se
+        registran por separado: si el scan response falla pero el advertising no,
+        la causa es que las propiedades `ScanResponse*` no existen en esta
+        versión de BlueZ, que es información distinta de "no se puede anunciar".
+        """
         opciones = opciones_anuncio(
             self.peer_id, scan_response=con_scan_response
         )
         try:
             await self._proxy.call_register_advertisement(self._ruta, opciones)
+            self.ultimo_error = None
             return True
         except Exception as exc:
+            self.ultimo_error = (
+                f"scan_response={con_scan_response}: "
+                f"{type(exc).__name__}: {exc}"
+            )
             log.info(
                 "registro con scan_response=%s rechazado: %s",
                 con_scan_response, exc,

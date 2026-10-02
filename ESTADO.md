@@ -1,6 +1,6 @@
 # Estado del proyecto — punto de reanudación
 
-**Fecha de corte:** 2026-10-01
+**Fecha de corte:** 2026-10-02
 **Objetivo:** cliente BitChat en Python para **Android + Linux** (iOS fuera de
 alcance). Es una **reimplementación**, no un port de `bitchat-tui`.
 
@@ -10,313 +10,287 @@ alcance). Es una **reimplementación**, no un port de `bitchat-tui`.
 
 ---
 
-## 1. Cómo arrancar
+## 1. Dónde estamos: **el enlace BLE funciona en las dos direcciones**
 
-```powershell
-cd C:\PyBitChat
-$env:PYTHONIOENCODING='utf-8'
-.\.venv\Scripts\python.exe tools\run_tests.py ; echo "exit=$LASTEXITCODE"
+Esto es lo importante y no estaba previsto al empezar el día: se ha **verificado
+con tráfico real de la app Android**, no con captura del Rust ni con lectura del
+código.
+
+| | Estado |
+|---|---|
+| Codec de payloads, v1 y v2 | ✅ |
+| Noise XX handshake (Cacophony/Noise-C) | ✅ 39 vectores |
+| Conformidad con los tests de la app | ✅ 48 casos portados |
+| **Descubrimiento del teléfono** | ✅ **visto en 6 direcciones distintas** |
+| **Conexión GATT sin emparejar** | ✅ |
+| **MTU 517** | ✅ coincide con Android 14+ |
+| **Recepción de paquetes reales** | ✅ 4 paquetes decodificados |
+| **Envío de identidad válida** | ✅ la app responde, sin handshake todavía |
+| **Anuncio como peripheral** | 🔧 en prueba — commit `0c8c613` |
+| Handshake Noise con la app real | ❌ **falta** |
+
+### Lo que seMidió contra el teléfono
+
+- Servicio `F47B5E2D-…` y characteristic `A1B2C3D4-…`, sin emparejar.
+- **MTU 517** tras `_acquire_mtu()`. El valor por defecto de BlueZ es **23**, y
+  sin pedirlo el envío grande falla en silencio.
+- **Las MAC rotan**: seis direcciones distintas en seis escaneos. Es 地址 privada
+  resoluble de Android. Por eso `bleak_transport` resuelve por UUID en cada
+  conexión y no cachea nada.
+
+## 2. Los cuatro hallazgos que cambiaron el diseño
+
+### 2.1 `ANNOUNCE` **no** es sólo un nickname
+
+Es un TLV con la identidad criptográfica entera
+(`model/IdentityAnnouncement.kt`):
+
+```
+[tipo u8][longitud u8][valor]      <- ¡longitud de UN byte!
+
+0x01 NICKNAME           obligatorio
+0x02 NOISE_PUBLIC_KEY   obligatorio, X25519 estática
+0x03 SIGNING_PUBLIC_KEY obligatorio, Ed25519
+0x05 CAPABILITIES       opcional, bitfield little-endian
 ```
 
-En Linux, desde la raíz del repo:
+⚠️ La longitud es de **un byte**, a diferencia del TLV de `BitchatFilePacket`
+que usa u16. Confundir los dos rompe el handshake entero.
+
+`AnnouncePayload` (sólo nickname) es el formato del **dialecto retirado**.
+
+### 2.2 El `peer_id` **se deriva**, no se elige
+
+Son los 8 primeros bytes de `SHA-256(clave pública X25519)`. Verificado:
+
+```
+clave Noise  973585b6502836ff…   (real, del móvil)
+sender_id    34e01ccea10a8c6d     = sha256(...)[:8]  ✓
+```
+
+Un par puede comprobar que el `sender_id` corresponde a la clave que dice
+anunciar. Ése es el mecanismo anti-suplantación, y explica por qué un
+`sender_id` inventado no sirve de nada.
+
+### 2.3 La app **identifica por `peer_id`, no por MAC**
+
+De `BluetoothGattServerManager.kt:389-407`:
+
+- **Paquete de advertising**: sólo `ServiceUUIDs`, sin tx-power ni nombre.
+- **Scan response**: `ServiceData[UUID]` = los 8 primeros bytes del peerID.
+
+> *Add stable identity to Scan Response. This allows scanners to deduplicate
+> devices even if MAC address rotates*
+
+**Consecuencia:** conectar a la app no basta. Hay que **existir en el anuncio**,
+porque si no nunca aparecemos con nuestro `peer_id`.
+
+### 2.4 La salida de DEFLATE **no es canónica**
+
+Java y Python producen bytes distintos para la misma entrada. Como la
+verificación de firma re-codifica el paquete, re-comprimir un payload ajeno
+**haría que una firma válida dejara de validar**. Implementado como
+`WirePayload`, igual que Android.
+
+---
+
+## 3. Los tres problemas abiertos
+
+### 3.1 No llega el handshake Noise
+
+Mandamos identidad válida y la app responde con su announce y un paquete de
+relleno, pero **ningún `NOISE_HANDSHAKE` (0x10)**.
+
+**Hipótesis principal:** nos faltaba el anuncio. Se acaba de implementar
+(`ble/advertiser.py`). Si ahora sí lo anuncia y sigue sin handshake, el motivo
+será otro y habrá que Investigarlo.
+
+### 3.2 Contradicción del relleno, sin resolver
+
+`BLEPacketPaddingPolicy.shouldPadForBLE` dice que **sólo** se rellenan las
+tramas Noise, y se usa de verdad (`BluetoothPacketBroadcaster.kt:215, 237, 350`).
+
+Pero los paquetes capturados son un `ANNOUNCE` y un `MESSAGE`, ninguno Noise, y
+**sí vienen rellenos** con PKCS#7 exacto:
+
+| Paquete | Contenido | Relleno | Byte |
+|---|---|---|---|
+| ANNOUNCE | 166 B | 90 B | `0x5a` = 90 |
+| filler | 96 B | 160 B | `0xa0` = 160 |
+
+**No se cambió el comportamiento.** La función sigue reflejando el código, que
+es lo verificable, y el conflicto está documentado en el docstring. Cambiarla
+con una observación que no se explica sería sustituir una afirmación sin
+verificar por otra igual de sin verificar.
+
+### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
+
+`payload_len = 2` pero el contenido son 96 B. Los 72 sobrantes son `0xff`, que
+es el identificador de emisor general de BitChat repetido.
+
+Además nuestro `MESSAGE` rechaza el payload de 4 bytes (`"exit"`) porque
+`MIN_PAYLOAD_SIZE = 13`. **No está claro si la app se sale de spec o si nuestro
+mínimo es demasiado estricto.**
+
+---
+
+## 4. Cómo arrancar
+
+### En el host Linux (donde está el Bluetooth)
 
 ```bash
+cd ~/PyBitChat && git pull
 ./.venv/bin/python tools/run_tests.py ; echo "exit=$?"
 ```
 
-**Mira el código de salida, no el texto.** Una versión anterior de esta
-documentación usaba un bucle de PowerShell que grepeaba `^OK$` con `-match`, que
-no distingue mayúsculas, y por eso se le escaparon cuatro fallos durante días. Ver §5, punto
-11.
+**Mira el `exit=`, no el texto.** Ver §6, punto 11.
 
-| Fichero | Tests | Cubre |
-|---------|-------|-------|
-| `tests/test_dialect.py` | 21 | Constantes Android con `file:line` |
-| `tests/test_payloads.py` | 25 | `ANNOUNCE`, fragmentación, opacidad |
-| `tests/test_golden_packets.py` | 19 | Los 21 paquetes reales, byte a byte |
-| `tests/test_noise_vectors.py` | 39 | Handshake XX, framing, anti-replay |
-| `tests/test_current_payloads.py` | 44 | `MESSAGE`, TLV, voz |
-| `tests/test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad |
-| `tests/test_transport.py` | 71 | Compresión, reensamblado, GATT, transporte |
-| `tests/test_conformance.py` | 48 | **Portado de los tests de la propia app** |
-| **Total** | **286** | **todos en verde** |
-
-### Sobre `test_conformance.py`
-
-Cada caso viene de
-`app/src/test/java/com/bitchat/android/protocol/BinaryProtocolTest.kt`, con el
-nombre original entrecomillado. Son **las expectativas del autor del protocolo
-sobre su propia implementación**, no las nuestras.
-
-⚠️ No sustituye a la interop en vivo. Nada offline la sustituye. Si algún día
-esta suite pasa y el cliente real no conecta, el fallo está en el transporte,
-no en el códec.
-
-Detalle importante del entorno: **PowerShell destroza los `python -c` en línea
-con llaves y comillas**. Para scripts de un solo uso, escribir un fichero y
-ejecutarlo, o usar `tools/extract_vectors.py`.
-
-`reference/` está en `.gitignore` porque es un clon de solo lectura de
-`vaibhav-mattoo/bitchat-tui` (MIT, 2024). Si hace falta:
-
-```powershell
-git clone https://github.com/vaibhav-mattoo/bitchat-tui reference/bitchat-tui
+Si falta el venv:
+```bash
+sudo apt install -y python3.14-venv build-essential python3-dev
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt
 ```
 
-Lo único que se conserva de esa fuente son los vectores ya extraídos, en
-`tests/fixtures/vectors.json`, regenerables con `tools/extract_vectors.py`.
+### Probar el enlace
+
+```bash
+./.venv/bin/python tools/smoke_ble.py        # conectar y enviar announce
+./.venv/bin/python tools/probe_advertise.py  # anunciar y comprobar
+```
+
+Móvil **desbloqueado con BitChat en primer plano**: Android deja de anunciar
+cuando la app pasa a segundo plano.
+
+| Fichero | Qué prueba |
+|---|---|
+| `tools/smoke_ble.py` | Conecta, envía announce, registra lo que llega |
+| `tools/probe_advertise.py` | Anuncia y escanea, para ver si nos finds |
+| `tools/extract_vectors.py` | Regenera `tests/fixtures/vectors.json` |
+
+### Reparto de tests
+
+| Fichero | Tests | Cubre |
+|---|---|---|
+| `test_transport.py` | 78 | Compresión, reensamblado, GATT, transporte |
+| `test_identity.py` | 59 | TLV de identidad, `peer_id`, firma, persistencia |
+| `test_current_payloads.py` | 44 | `MESSAGE`, TLV de fichero, voz |
+| `test_noise_vectors.py` | 39 | Handshake XX, framing, anti-replay |
+| `test_payloads.py` | 25 | `ANNOUNCE`, fragmentación, opacidad |
+| `test_dialect.py` | 21 | Constantes Android con `file:line` |
+| `test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad |
+| `test_golden_packets.py` | 19 | Los 21 paquetes reales, byte a byte |
+| `test_advertiser.py` | 18 | Forma del anuncio y rutas D-Bus |
+| `test_smoke_ble.py` | 14 | Construcción del announce, hexdump |
+| `test_bleak_transport.py` | 8 | Transporte real (6 se saltan sin bleak) |
+| **Total** | **392** | 6 saltados = requieren hardware |
+
+### Ficheros del proyecto
+
+- `src/pybitchat/protocol/` — `types.py` (enums y constantes), `packet.py`
+  (cabecera v1/v2, compresión, `WirePayload`), `identity.py` (identidad y
+  anuncio TLV), `payloads.py` (despacho), `compression.py`, `reassembly.py`,
+  `message.py`, `tlv.py`, `voice.py`, `packet.py`
+- `src/pybitchat/noise/` — `session.py`, `framing.py`, `primitives.py`
+- `src/pybitchat/ble/` — `gatt.py` (UUIDs), `bleak_transport.py`,
+  `advertiser.py`
+- `src/pybitchat/mesh/transport.py` — `Transport` abstracto y `MockTransport`
+- `EVALUACION-MIGRACION.md` — informe, 939 líneas, 14 secciones
 
 ---
 
-## 2. Qué está hecho
+## 5. Por dónde seguir mañana
 
-| Fase | Contenido | Estado |
-|------|-----------|--------|
-| 0 | Vectores reales + 3 oráculos independientes | ✅ |
-| 1 | Codec de payloads | ✅ |
-| 1.5 | Dialecto: constantes Android con procedencia | ✅ |
-| 3 | Noise XX handshake + transporte + anti-replay | ✅ |
-| — | Payloads del dialecto actual (`MESSAGE`, TLV, voz) | ✅ |
-| **2a** | **Compresión, reensamblado, GATT, transporte inyectable** | ✅ |
-| 2b | `ble/bleak_transport.py` y enlace real | ❌ necesita hardware |
+### Primero: el resultado del announce
 
-Ficheros con el detalle de cada decisión:
+Si `probe_advertise.py` anuncia bien, el siguiente paso natural es el
+**servidor GATT** (`org.bluez.GattManager1`). No hay atajo: bleak 3.0.2 no
+puede ser peripheral en Linux, así que hay que implementarlo a mano, igual que
+el anuncio.
 
-- `src/pybitchat/protocol/types.py` — los dos enums (`MessageType` actual,
-  `LegacyMessageType` retirado), constantes, vectores de Noise.
-- `src/pybitchat/protocol/packet.py` — cabecera de **14** bytes, compresión y `WirePayload`.
-- `src/pybitchat/protocol/payloads.py` — despacho, registro de huecos, tamaño de fragmento.
-- `src/pybitchat/protocol/compression.py` — DEFLATE crudo y guardas anti zip-bomb.
-- `src/pybitchat/protocol/reassembly.py` — receptor de fragmentos.
-- `src/pybitchat/ble/gatt.py` — UUIDs GATT y constantes de peers.
-- `src/pybitchat/mesh/transport.py` — `Transport` abstracto y `MockTransport`.
-- `src/pybitchat/protocol/message.py`, `tlv.py`, `voice.py` — payloads actuales.
-- `src/pybitchat/noise/session.py`, `framing.py`, `primitives.py` — Noise.
-- `EVALUACION-MIGRACION.md` — informe de 939 líneas, 14 secciones.
+**Orden de trabajo, con tests antes que hardware:**
+
+1. `ble/gatt_server.py` — `org.bluez.GattManager1` con un servicio y el
+   characteristic de BitChat, `org.bluez.GattService1` y
+   `org.bluez.GattCharacteristic1`.
+2. **Tests de formato primero**: rutas de objeto, firmas D-Bus, nombres de
+   interfaz. Es lo que más ha atrapado (§6, punto 12).
+3. Probar en hardware con un paso corto y aislado.
+
+Pregunta abierta antes de escribirlo: **¿hace falta?** Si la app nos descubre
+por el anuncio y nos escribe por la conexión que nosotros abrimos, el servidor
+GATT puede no hacer falta para el primer hito. Conviene comprobarlo.
+
+### Después: los tres problemas abiertos
+
+Orden sugerido:
+
+1. **Los 72 bytes de `0xff`** (§3.3). Es lo que más información da y es lo
+   único que la app manda y no entendemos. Candidatos: `Special recipient IDs`
+   en `BinaryProtocol.kt:32`, o relleno deliberado.
+2. **El `MESSAGE` de 4 bytes** que rechazamos. ¿Se sale la app de spec o
+   nuestro `MIN_PAYLOAD_SIZE` es demasiado estricto?
+3. **La contradicción del relleno** (§3.2). Requiere leer
+   `MessagePadding` y `BinaryProtocol.encode` a fondo.
+
+### Después: el handshake
+
+Con identidad válida y anuncio, el siguiente paso es `msg1` de Noise XX. La
+parte criptográfica ya está hecha y verificada con vectores; falta el
+transporte que la mueva y la preimagen de firma, que ya está implementada como
+`to_binary_data_for_signing()`.
+
+**Detalle que ya se sabe:** el TTL se fija a 0 al firmar, porque baja en cada
+salto y si entrara en la preimagen cualquier paquete reenviado una sola vez
+llegaría con firma inválida.
 
 ---
 
-## 3. Decisiones ya tomadas (no re-litigar)
+## 6. Decisiones que **no** conviene re-litigar
 
-1. **Motor de handshake = `noiseprotocol`**, no hecho a mano. BitChat usa Noise
-   **rev 32/33** (`MixKey`: clave de cifrado = salida 2 de HKDF, sin
-   `MixHash(temp)`), no rev 34. Una implementación a mano de rev 34 coincidía
-   en msg1 pero divergía en el primer byte de msg2. `noiseprotocol` reproduce
-   los vectores de `NoiseExternalVectorTest.kt` byte a byte.
-
-2. **Dos enums, no uno.** Los dialectos se diferencian por **renumeración**, no
-   por inclusión: `0x11` es `NOISE_HANDSHAKE_RESP` en el viejo y
-   `NOISE_ENCRYPTED` en el actual. Mezclarlos no da error, da basura silenciosa.
-   `decode_payload` exige `dialect=` para los 6 valores ambiguos
-   (`0x02, 0x10, 0x11, 0x20, 0x21, 0x22`) y **se niega a adivinar**.
-
-3. **Un payload desconocido se conserva `OpaquePayload`, byte-exacto.** Nunca se
-   adivina. Es deliberado: es exactamente el error que tumbó al cliente Rust.
-
-4. **El prefijo del transporte es big-endian; el nonce del AEAD es
-   little-endian.** Son opuestos. Los dos casos están cubiertos por tests con
-   nombre (`TestEndiannessDelPrefijo`).
-
-5. **El transporte usa la clave dividida directamente, sin derivación de
-   época** (`ChaChaPolyCipherState.setNonce` es sólo `n = nonce`).
-
-6. **El prologue de producción va vacío** (`NoiseSession.kt:244` no llama a
+1. **No portar `bitchat-tui`.** Habla un dialecto retirado.
+2. **Motor de handshake = `noiseprotocol`**, no hecho a mano. BitChat usa Noise
+   **rev 32/33** (`MixKey` sin `MixHash(temp)`), no rev 34.
+3. **Dos enums, no uno.** Los dialectos se diferencian por **renumeración**:
+   `0x11` es `NOISE_HANDSHAKE_RESP` en el viejo y `NOISE_ENCRYPTED` en el
+   actual. Mezclarlos no da error, da basura silenciosa. `decode_payload` exige
+   `dialect=` para los 6 valores ambiguos.
+4. **Un payload desconocido se conserva opaco y byte-exacto.** Nunca se adivina.
+   Es el error exacto que tumbó al cliente Rust.
+5. **El registro de huecos se indexa por `(dialecto, valor)`.** `PROTOCOL_ACK`
+   (legacy) y `FILE_TRANSFER` (actual) son ambos `0x22`.
+6. **El prefijo de transporte es big-endian; el nonce del AEAD,
+   little-endian.** Son opuestos.
+7. **El prologue de producción va vacío** (`NoiseSession.kt:244` no llama a
    `setPrologue`). Ojo: `HandshakeState.java:512-516` siempre hace `mixHash`
-   aunque el prologue sea vacío — es un no-op que **cambia `h`**, así que no se
-   puede "optimizar" fuera.
-
-7. **Android rellena sólo las tramas Noise** (`BLEPacketPaddingPolicy.kt`); el
-   Rust rellenaba todo. PKCS#7 blocks256/512/1024/2048, saltando si el relleno
-   pasa de 255 B. Compresión **DEFLATE** (`CompressionUtil.kt`), no LZ4.
-
-8. La cabecera es de **14** bytes (`BinaryProtocol.kt:208-217`), no de 13 como
-   dicen el README de Android y el propio `bitchat-tui`.
-
-9. **DEFLATE crudo, sin cabeceras zlib** (`wbits=-15` en Python). Con el valor
-   por defecto de `zlib` se meterían 2 bytes que el receptor no puede
-   descomprimir. Al leer sí se toleran ambas formas, como la app.
-
-10. **Nunca re-comprimir un payload ajeno.** La salida de DEFLATE no es
-    canónica: Java y Python dan bytes distintos para la misma entrada, y como la
-    verificación de firma re-codifica el paquete, re-comprimir rompería una
-    firma válida. Por eso existe `WirePayload`. Android explica el porqué en
-    `BinaryProtocol.kt:43-46`.
-
-11. **El tamaño de fragmento no es `MAX_FRAGMENT_SIZE`.** Es `512 - overhead`,
-    descontando el sobre real. Sin ruta da 469, pero con rutas largas el fijo se
-    queda corto y el relleno empuja cada fragmento al cubo de 1024.
-
-12. **v1 y v2, ambas implementadas.** Android emite siempre v1
-    (`BitchatPacket.version = 1u`) pero acepta las dos, y su suite de tests cubre
-    v2 a fondo. v2 cambia el tamaño de cabecera a 16 B y la longitud del payload
-    a u32, y añade una sección de ruta opcional. Una versión desconocida da
-    `UnsupportedVersionError`, que dice "reconocida pero no implementada" en vez
-    de "desconocida".
-
-13. **La preimagen de firma no incluye el TTL.** `to_binary_data_for_signing()`
-    quita la firma y fija el TTL a 0. El TTL baja en cada salto, así que
-    incluirlo haría que un paquete reenviado una sola vez llegue con firma
-    inválida.
-
----
-
-## 4. Qué queda abierto
-
-| Hueco | Qué falta | Bloquea |
-|-------|-----------|---------|
-| **H1** | 7 paquetes que el Rust envió no tienen volcado hex. Sólo se capturó el tráfico entrante. | Nada crítico |
-| **H2** | *Prologue* de producción sin confirmar contra captura real. | Fase 3 (resto hecho) |
-| **Firmas** | `packet.py` detecta `HAS_SIGNATURE` y salta los 64 bytes, pero **no verifica**. Hace falta la clave de identidad Noise de un par. | Nada todavía |
-| **2b** | `ble/bleak_transport.py` y enlace real. | El camino a un cliente real |
-
-### Por qué 2b sigue bloqueada aquí
-
-Esta VM es un **guest de VirtualBox sin adaptador Bluetooth** y sin WSL.
-Verificado: sólo `Intel PRO/1000 MT` Ethernet, cero dispositivos PnP de BT, y
-no existen `bluetoothctl`, `btmon` ni `hciconfig`.
-
-**Hace falta la máquina Linux con el teléfono Android asociado**, que sí está
-disponible y tiene la app instalada. La parte 2a (compresión, reensamblado,
-GATT, transporte) ya está hecha y probada, así que 2b es escribir
-`ble/bleak_transport.py` y perfilar el enlace real.
-
-Sobre el adaptador: en Windows el Bluetooth interno es casi siempre un
-**dispositivo USB compuesto** (padre genérico con interfaces BT + HID), y por
-eso VirtualBox lo rechaza al filtrar por vendor/product. Un **dongle USB de
-5-10 €** lo esquiva: es un USB plano y cualquier hipervisor lo deja pasar.
-
-Al arrancar con BLE, tener en cuenta:
-
-- MTU: Android 14+ = **517**; BlueZ vía bleak = **23** salvo que se llame a
-  `_acquire_mtu()`.
-- `MAX_FRAGMENT_SIZE=469`, `FRAGMENT_SIZE_THRESHOLD=512`,
-  `MAX_FRAGMENTS_PER_ID=256`.
-- El fragmento corta el paquete **ya rellenado**, así que la cabecera de 14 B
-  puede quedar partida entre dos fragmentos. El reensamblado concatena bytes a
-  secas, sin interpretar nada.
-- BitChat usa **GATT y advertising a la vez**: el advertising hace el
-  dispositivo descubrible, y el GATT mueve los datos. Faltar cualquiera de los
-  dos rompe la malla.
-
-### Por qué H3, H4 y H5 se descartaron
-
-Eran la siguiente tarea propuesta, pero **ninguno de los tres existe ya en el
-protocolo actual**:
-
-| Hueco | Tipo | Valor | ¿En `MessageType`? |
-|-------|------|-------|--------------------|
-| H3 | `NOISE_IDENTITY_ANNOUNCE` | `0x13` | **No** |
-| H4 | `HANDSHAKE_REQUEST` | `0x25` | **No** |
-| H5 | `PROTOCOL_ACK` | `0x22` | Sí, pero es **`FILE_TRANSFER`** |
-
-Son artefactos del dialecto retirado. En su lugar se cerraron los tipos **vivos**
-que faltaban: H6 `REQUEST_SYNC`, H7 `FILE_TRANSFER`, H8 `VOICE_FRAME`, más el
-`MESSAGE` completo. Ver `EVALUACION-MIGRACION.md` §12.7.
-
----
-
-## 5. Bugs reales encontrados (no volver a introducirlos)
-
-1. **`False is not None` es `True` en Python.** El cálculo de flags de
-   `MessagePayload` trataba `is_relay` como campo opcional, así que
-   `is_relay=False` activaba el bit `0x01` y contaminaba todos los mensajes.
-   Los flags booleanos están separados de los campos opcionales (`BOOL_FLAGS`).
-
-2. **Un registro indexado por valor crudo no puede representar dos dialectos.**
-   `OPEN_QUESTIONS` usaba el valor crudo como clave, pero `PROTOCOL_ACK` (legacy)
-   y `FILE_TRANSFER` (actual) son **ambos `0x22`**: una entrada pisaba a la
-   otra. Ahora la clave es `(dialecto, valor_crudo)`, con las vistas derivadas
-   `OPAQUE_BY_DIALECT` y `open_question_for()`. El bug no fallaba ruidosamente:
-   devolvía una respuesta plausible y equivocada.
-
-3. **`BitchatFilePacket.kt:14` miente.** El comentario dice *"Length field for
-   TLV is 2 bytes for all TLVs"*, pero el código usa `buf.putInt` para `CONTENT`,
-   o sea **u32** (`:87`, y `off += 4` en el decode `:120-123`). Fiarse del
-   comentario rompe la interop sólo con ficheros grandes: intermitente y difícil
-   de diagnosticar. **El código es el que manda.**
-
-4. **Re-comprimir un payload ajeno rompe las firmas ajenas.** La salida de
-   DEFLATE no es canónica: Java y Python dan bytes distintos para la misma
-   entrada. Como la verificación de firma re-codifica el paquete, el resultado es
-   una firma que deja de validar. Android lo evita con `WirePayload`
-   (`BinaryProtocol.kt:43-46, 527-530`). Sin esto el fallo sólo aparece con
-   mensajes largos **y en un relé real**: intermitente y fácil de atribuir al
-   ruido de la red.
-
-5. **`MAX_FRAGMENT_SIZE` es una constante fija que ignora la ruta.** El cálculo
-   real es `512 - overhead` (`FragmentManager.kt:106-108`). Sin ruta sale 469,
-   pero con saltos el fragmento se sale del bloque y el relleno lo lleva a 1024.
-
-6. **Fallo mío,apyuntado para no repetirlo:** En un test, afirmé que con
-   destinatario los fragmentos se duplicaban a 1024. Era un error aritmético
-   mío por contar la cabecera de fragmento dos veces; sin destino ni ruta el
-   total es 491 y sobra margen. El fallo real es sólo con rutas largas.
-
-7. **`from exc` sólo existe en `raise`,** no en `return`. Escribir
-   `return X(...) from exc` es un error de sintaxis, no un bug de lógica.
-
-8. **El directorio temporal (`%TEMP%`) pierde los caracteres no Latin-1.**
-   Al escribir ahí, los em-dash y los emoji se sustituyen por `-` y `?`. Los
-   ficheros del proyecto no: se conservan intactos. Razonable para preparar un
-   trozo de informe, pero hay que comprobar el resultado antes de insertarlo.
-
-9. **`zlib.error` no es un resultado vacío: es una excepción.** Este es el que más
-   cuesta olvidar. En Python, datos comprimidos malformados no devuelven `None`
-   ni cadena vacía, **lanzan**. Sin capturarla, un payload corrupto tumba el
-   bucle de recepción en vez de descartarse. La app lo captura explícitamente
-   (`CompressionUtil.kt:121-124`) y hay que hacerlo igual.
-
-10. **v1 y v2 están implementadas.** Cabecera de 14 y 16 bytes, longitud u16 y
-    u32, ruta opcional sólo en v2. Android emite siempre v1 pero acepta las dos.
-
-11. **`-match` en PowerShell NO distingue mayúsculas.** Lo que más me costó.
-    Durante varias sesiones di por buena una suite de "286 tests en verde"
-    usando `$txt -match '(?m)^OK\s*$'`. Pero los tests que pasan imprimen una
-    línea en minúscula `... ok`, así que el patrón casaba con **cualquier
-    fichero que tuviera un solo test verde**. Cuatro tests llevaban días
-    fallando y el contador daba cero fallos.
-
-    La lección no es "usa `-cmatch`", es **no parsear la salida para decidir si
-    algo pasó**. Para eso está el código de salida del proceso, que no se puede
-    interpretar mal:
-
-    ```
-    .venv\Scripts\python.exe tools\run_tests.py ; echo "exit=$LASTEXITCODE"
-    ./venv/bin/python tools/run_tests.py ; echo "exit=$?"
-    ```
-
-12. **`make_packet` vive en `test_conformance.py`.** Los ficheros de test no se
-    importan entre sí: cada uno es autónomo. Si un test necesita un constructor
-    de paquetes, o está en el fichero de conformidad, o define el suyo.
-
----
-
-## 6. Sobre `msg1` y los tests verdes
-
-`msg1` del handshake **no valida criptografía**: son 32 B efímeros más payload en
-claro, porque todavía no hay clave. El primer dato real es **msg2** (111 B).
-
-> Un `msg1` en verde no dice nada. No confundirlo con una verificación de
-> seguridad.
+   aunque sea vacío — es un no-op que **cambia `h`**, así que no se puede
+   "optimizar".
+8. **La cabecera es de 14 bytes** en v1 y **16** en v2. El README de Android
+   dice 13 porque copió la constante equivocada de `FragmentManager.kt:98`
+   (`headerSize = 13`), que es un off-by-one propagado.
+9. **DEFLATE crudo** (`wbits=-15`). Con el valor por defecto de `zlib` se
+   meterían 2 bytes de cabecera que el receptor no puede descomprimir.
+10. **Nunca re-comprimir un payload ajeno.** Ver §2.4.
+11. **`-match` en PowerShell NO distingue mayúsculas.** Se Creía tener "286
+    tests en verde" con cuatro testsyendo rojos, porque `$txt -match '^OK$'` casaba
+    con las líneas en minúscula `... ok` que imprime cada test que pasa. Por
+    eso existe `tools/run_tests.py`, que **usa el código de salida del proceso**.
+    Ver §5 para el comando.
+12. **Los fallos que sólo aparecen en hardware son por suposición, no por
+    lógica.** En el módulo de anuncio hubo tres: dict recorrido como lista de
+    pares, nombre de bus usado como ruta de objeto, y firma de método deducida
+    de una anotación que no la lleva. **La API hay que leerla antes de
+    escribirla**, como se hizo con el Kotlin de la app, donde no ha habido ni un
+    fallo de ese tipo en 392 tests.
 
 ---
 
 ## 7. Notas de estilo
 
-- La documentación de los módulos es en español y explica **por qué**, no sólo
-  qué. Cuando un layout está confirmado por una sola cara del código se
-  dice explícitamente que es una hipótesis.
+- La documentación es en español y explica **por qué**, no sólo qué.
+- Cuando un layout está confirmado por una sola cara del código se dice
+  explícitamente que es una hipótesis.
 - Cada constante de Android lleva `file:line` de procedencia.
 - Los tests llevan nombre descriptivo en español y, cuando cubren un caso
   raro, el motivo por el que ese caso importa.
-
----
-
-## 8. Opcional: avisar al upstream
-
-Los hallazgos corroboran el issue #12. El repo tiene 18 issues abiertos y 14
-meses sin commits. Podría merecer la pena reportar, en particular:
-
-- El comentario de `BitchatFilePacket.kt:14` contradice el código.
-- La cabecera es de 14 B, no de 13 como dice el README.
-- El dialecto de `bitchat-tui` está retirado.
+- Un descarte o un rechazo **lleva el motivo registrado**, no falla en silencio.
