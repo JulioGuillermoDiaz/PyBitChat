@@ -11,6 +11,7 @@ Ejecutar:
 
 from __future__ import annotations
 
+import pathlib
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pybitchat.protocol.identity import (  # noqa: E402
     KEY_LEN,
+    PEER_ID_LEN,
     SIGNATURE_LEN,
     Capability,
     Identity,
@@ -28,6 +30,7 @@ from pybitchat.protocol.identity import (  # noqa: E402
     UnknownTlv,
     decode_capabilities,
     encode_capabilities,
+    peer_id_from_noise_key,
 )
 from pybitchat.protocol.packet import ProtocolError  # noqa: E402
 
@@ -362,6 +365,126 @@ class TestFidelidadDelAnuncio(unittest.TestCase):
         ident = Identity.generate("ab")  # nickname de 2 bytes
         # 4 + 34 + 34 + (1+1+2) = 76
         self.assertEqual(len(ident.announcement().to_bytes()), 76)
+
+
+class TestDerivacionDelPeerId(unittest.TestCase):
+    """El `sender_id` se deriva de la clave Noise; no se elige."""
+
+    #: sender_id que la app Android puso en su announce real.
+    SENDER_ID_REAL = bytes.fromhex("34e01ccea10a8c6d")
+
+    def test_deriva_de_la_clave_noise(self):
+        """Verificado contra tráfico real, no contra el código."""
+        self.assertEqual(
+            peer_id_from_noise_key(CLAVE_NOISE_REAL), self.SENDER_ID_REAL
+        )
+
+    def test_es_sha256_primeros_8(self):
+        import hashlib
+
+        esperado = hashlib.sha256(CLAVE_NOISE_REAL).digest()[:8]
+        self.assertEqual(peer_id_from_noise_key(CLAVE_NOISE_REAL), esperado)
+
+    def test_mide_8_bytes(self):
+        self.assertEqual(len(peer_id_from_noise_key(CLAVE_NOISE_REAL)), PEER_ID_LEN)
+        self.assertEqual(PEER_ID_LEN, 8)
+
+    def test_es_determinista(self):
+        """La misma clave da siempre el mismo id: es una función, no un azar."""
+        a = peer_id_from_noise_key(CLAVE_NOISE_REAL)
+        b = peer_id_from_noise_key(CLAVE_NOISE_REAL)
+        self.assertEqual(a, b)
+
+    def test_claves_distintas_dan_ids_distintos(self):
+        otra = Identity.generate("otro").noise_public
+        self.assertNotEqual(
+            peer_id_from_noise_key(CLAVE_NOISE_REAL), peer_id_from_noise_key(otra)
+        )
+
+    def test_no_depende_del_nickname(self):
+        """El nickname no participa: cambiarlo no cambia el id."""
+        a = Identity.generate("uno", noise_private=b"\x01" * 32)
+        b = Identity.generate("dos", noise_private=b"\x01" * 32)
+        self.assertEqual(a.peer_id, b.peer_id)
+
+    def test_clave_de_longitud_equivocada_se_rechaza(self):
+        for mala in (b"", b"\x00" * 31, b"\x00" * 33):
+            with self.subTest(longitud=len(mala)):
+                with self.assertRaises(ValueError):
+                    peer_id_from_noise_key(mala)
+
+
+class TestAnnounceCompleto(unittest.TestCase):
+    """El paquete que emitimos de verdad."""
+
+    def setUp(self):
+        import tempfile
+
+        self.ident = Identity.generate("pybitchat-probe")
+
+    def test_el_sender_id_corresponde_a_la_clave_anunciada(self):
+        """La coherencia que permite a un par detectar una suplantación."""
+        from pybitchat.protocol.packet import Packet
+
+        p = Packet.from_bytes(self.ident.announce_packet())
+        anuncio = IdentityAnnouncement.parse(p.payload)
+        self.assertEqual(p.sender_id, peer_id_from_noise_key(anuncio.noise_public_key))
+
+    def test_es_un_announce_del_dialecto_actual(self):
+        from pybitchat.protocol.packet import Packet
+
+        p = Packet.from_bytes(self.ident.announce_packet())
+        self.assertEqual(p.header.raw_type, 0x01)
+        anuncio = IdentityAnnouncement.parse(p.payload)
+        self.assertEqual(anuncio.nickname, "pybitchat-probe")
+        self.assertEqual(anuncio.capabilities, Capability.LOCAL_SUPPORTED)
+
+    def test_mede_111_bytes(self):
+        """2+15 + 2+32 + 2+32 + 2+2 = 111."""
+        self.assertEqual(len(self.ident.announce_packet()), 111)
+
+    def test_timestamp_actual(self):
+        import time
+
+        from pybitchat.protocol.packet import Packet
+
+        p = Packet.from_bytes(self.ident.announce_packet())
+        self.assertLess(abs(time.time() * 1000 - p.header.timestamp) / 1000, 60)
+
+
+class TestPersistencia(unittest.TestCase):
+    """La identidad debe sobrevivir al reinicio, o somos un par distinto."""
+
+    def setUp(self):
+        import tempfile
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.ruta = pathlib.Path(self.dir.name) / "identity.json"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_se_guarda_y_se_recupera(self):
+        a = Identity.cargar_o_crear("persistente", ruta=self.ruta)
+        b = Identity.cargar_o_crear("otro", ruta=self.ruta)
+        self.assertEqual(a.peer_id, b.peer_id, "el peer_id debe ser el mismo")
+        self.assertEqual(b.nickname, "persistente", "el nombre no se cambia solo")
+
+    def test_el_nickname_se_ignora_si_ya_hay_identidad(self):
+        Identity.cargar_o_crear("primero", ruta=self.ruta)
+        b = Identity.cargar_o_crear("segundo", ruta=self.ruta)
+        self.assertEqual(b.nickname, "primero")
+
+    def test_fichero_corrupto_no_impide_arrancar(self):
+        self.ruta.write_text("{ no es json", encoding="utf-8")
+        ident = Identity.cargar_o_crear("recuperado", ruta=self.ruta)
+        self.assertEqual(ident.nickname, "recuperado")
+        self.assertEqual(len(ident.peer_id), PEER_ID_LEN)
+
+    def test_no_se_guarda_en_el_repo(self):
+        """El fichero de identidad no debe acabar en un commit."""
+        self.assertFalse(str(Identity.RUTA_POR_DEFECTO).startswith(str(ROOT)))
+        self.assertIn("pybitchat", str(Identity.RUTA_POR_DEFECTO))
 
 
 if __name__ == "__main__":

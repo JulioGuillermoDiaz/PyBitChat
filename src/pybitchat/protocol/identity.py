@@ -52,7 +52,11 @@ provoque handshake.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -65,7 +69,8 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from ..noise.primitives import DH_LEN, generate_x25519_private, x25519_public_from_private
-from .packet import ProtocolError
+from .packet import Packet, PacketHeader, ProtocolError
+from .types import PEER_ID_SIZE, PacketFlags
 
 #: Longitud de cada clave. Ambas son de 32 bytes.
 KEY_LEN = 32
@@ -325,6 +330,18 @@ class Identity:
     def signing_public(self) -> bytes:
         return _ed25519_key(self.signing_private).public_key().public_bytes_raw()
 
+    @property
+    def peer_id(self) -> bytes:
+        """Identificador de 8 bytes que va en la cabecera de cada paquete.
+
+        Derivado de la clave Noise, no elegido. Ver `peer_id_from_noise_key`.
+        """
+        return peer_id_from_noise_key(self.noise_public)
+
+    @property
+    def peer_id_hex(self) -> str:
+        return self.peer_id.hex()
+
     def announcement(self) -> IdentityAnnouncement:
         """El `ANNOUNCE` que emitimos: identidad completa, no sólo nickname."""
         return IdentityAnnouncement(
@@ -333,6 +350,28 @@ class Identity:
             signing_public_key=self.signing_public,
             capabilities=self.capabilities,
         )
+
+    def announce_packet(self, *, ttl: int = 3, timestamp: int | None = None) -> bytes:
+        """El paquete `ANNOUNCE` completo, listo para escribir en GATT.
+
+        El `sender_id` sale de la clave, así que el paquete es coherente consigo
+        mismo: quien lo reciba puede comprobar que el identificador corresponde a
+        la clave que announcea.
+        """
+        carga = self.announcement().to_bytes()
+        import time
+
+        cabecera = PacketHeader(
+            version=1,
+            raw_type=0x01,  # MessageType.ANNOUNCE
+            ttl=ttl,
+            timestamp=int(time.time() * 1000) if timestamp is None else timestamp,
+            flags=PacketFlags(0),
+            payload_len=len(carga),
+        )
+        return Packet(
+            header=cabecera, sender_id=self.peer_id, payload=carga
+        ).to_bytes()
 
     # -- firma --------------------------------------------------------------
 
@@ -380,6 +419,89 @@ class Identity:
             capabilities=int(datos.get("capabilities", Capability.LOCAL_SUPPORTED)),
         )
 
+    # -- en disco ------------------------------------------------------------
+
+    #: Dónde se guarda por defecto. Fuera del repo: es material secreto y no
+    #: debe acabar en un commit por accidente.
+    RUTA_POR_DEFECTO = Path.home() / ".local" / "share" / "pybitchat" / "identity.json"
+
+    def guardar(self, ruta: "Path | None" = None) -> Path:
+        destino = Path(ruta) if ruta else self.RUTA_POR_DEFECTO
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_text(
+            json.dumps(self.exportar(), indent=2) + "\n", encoding="utf-8"
+        )
+        try:
+            destino.chmod(0o600)
+        except OSError:
+            pass  # en Windows el modo POSIX no aplica
+        return destino
+
+    @classmethod
+    def cargar_o_crear(
+        cls,
+        nickname: str,
+        *,
+        ruta: "Path | None" = None,
+        capabilities: int = Capability.LOCAL_SUPPORTED,
+    ) -> "Identity":
+        """Recupera la identidad guardada, o crea una si no hay.
+
+        Que la identidad **persista** no es opcional: el `peer_id` se deriva de la
+        clave, así que una identidad nueva en cada arranque es un par distinto
+        cada vez. Los demás nunca volverían a encontrarnos y las sesiones Noise
+        previas quedarían huérfanas.
+        """
+        destino = Path(ruta) if ruta else cls.RUTA_POR_DEFECTO
+        if destino.exists():
+            try:
+                return cls.importar(json.loads(destino.read_text(encoding="utf-8")))
+            except (ValueError, KeyError, json.JSONDecodeError):
+                # Un fichero corrupto no puede impedir arrancar: se genera una
+                # identidad nueva y se avisa con la excepción, no se traga.
+                pass
+        nueva = cls.generate(nickname, capabilities=capabilities)
+        nueva.guardar(destino)
+        return nueva
+
+
+# --------------------------------------------------------------------------
+# Identificador de par
+# --------------------------------------------------------------------------
+
+#: Longitud del identificador de par.
+PEER_ID_LEN = PEER_ID_SIZE
+
+
+def peer_id_from_noise_key(noise_public_key: bytes) -> bytes:
+    """El `sender_id` de 8 bytes se **deriva** de la clave Noise.
+
+    Son los 8 primeros bytes de `SHA-256(clave_pública_X25519)`. Verificado
+    contra tráfico real de la app Android el 2026-10-02:
+
+        clave Noise  973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b
+        SHA-256(...)  34e01ccea10a8c6d...          <-- primeros 8
+        sender_id     34e01ccea10a8c6d            <-- el que iba en el paquete
+
+    ## Por qué importa
+
+    El identificador **no se elige**: sale de la clave. Eso significa que un par
+    puede comprobar que el `sender_id` de un announce corresponde a la clave
+    Noise que dice anunciar, y es lo que impide suplantar a otro.
+
+    También explica por qué un announce con un `sender_id` inventado no sirve de
+    nada: no está atado a ninguna clave, y no hay forma de responderle.
+
+    `SecureIdentityStateManager` calcula también huellas SHA-256 de la clave
+    pública, lo que es coherente con esta derivación. No se localizó la línea
+    exacta que la produce; la confirmación es empírica.
+    """
+    if len(noise_public_key) != KEY_LEN:
+        raise ValueError(
+            f"la clave Noise debe medir {KEY_LEN} B, tiene {len(noise_public_key)}"
+        )
+    return hashlib.sha256(noise_public_key).digest()[:PEER_ID_LEN]
+
 
 # --------------------------------------------------------------------------
 # Claves Ed25519
@@ -405,6 +527,7 @@ def _generate_ed25519_seed() -> bytes:
 __all__ = [
     "DH_LEN",
     "KEY_LEN",
+    "PEER_ID_LEN",
     "SIGNATURE_LEN",
     "Capability",
     "Identity",
@@ -413,4 +536,5 @@ __all__ = [
     "UnknownTlv",
     "decode_capabilities",
     "encode_capabilities",
+    "peer_id_from_noise_key",
 ]

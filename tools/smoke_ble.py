@@ -36,6 +36,7 @@ from pybitchat.ble.gatt import (  # noqa: E402
     CHARACTERISTIC_UUID,
     es_nuestro_servicio,
 )
+from pybitchat.protocol.identity import Identity  # noqa: E402
 from pybitchat.protocol.packet import Packet, PacketHeader  # noqa: E402
 from pybitchat.protocol.payloads import decode_payload, CURRENT  # noqa: E402
 from pybitchat.protocol.types import MessageType, PacketFlags  # noqa: E402
@@ -65,11 +66,13 @@ def hexdump(datos: bytes, sangria: str = "    ") -> str:
 def construir_announce(nickname: str, ttl: int = 3) -> bytes:
     """Monta un paquete ANNOUNCE con nuestro códec.
 
-    El payload es **sólo** el nickname en UTF-8, sin prefijo de longitud
-    (`AnnouncePayload`, validado contra los vectores reales).
+    Deprecation en favor de `Identity.announce_packet()`: este construía un
+    announce de **sólo nickname**, que es el formato del dialecto retirado. La app
+    actual necesita la identidad completa, así que esta función queda sólo como
+    referencia de lo que **no** hay que hacer.
 
-    No se rellena: `should_pad_for_ble` dice que sólo van rellenadas las tramas
-    Noise.
+    Para el announce correcto usa `Identity`, que deriva además el `sender_id`
+    de la clave Noise.
     """
     carga = nickname.encode("utf-8")
     cabecera = PacketHeader(
@@ -113,6 +116,15 @@ async def resolver_telefono(timeout: float):
 async def principal(args: argparse.Namespace) -> int:
     from bleak import BleakClient
 
+    # La identidad se carga de disco o se crea una vez. Que persista importa:
+    # el peer_id se deriva de la clave Noise, así que regenerarla en cada
+    # arranque haría que fuéramos un par distinto cada vez y nadie nos
+    # volvería a encontrar.
+    identidad = Identity.cargar_o_crear(args.nickname, ruta=args.identity)
+    print(f"identidad: nickname={identidad.nickname!r}  "
+          f"peer_id={identidad.peer_id_hex}")
+    print(f"  (guardada en {identidad.guardar(args.identity)})")
+
     hallado = await resolver_telefono(args.scan)
     if hallado is None:
         print("\nNO aparece el teléfono.")
@@ -155,8 +167,11 @@ async def principal(args: argparse.Namespace) -> int:
             print("  el teléfono no expone el characteristic de BitChat")
             return 1
 
-        paquete = construir_announce(args.nickname)
-        print(f"\nenviando ANNOUNCE: {len(paquete)} B")
+        paquete = args.paquete or identidad.announce_packet(ttl=3)
+        print(f"\nenviando ANNOUNCE de {args.nickname!r}")
+        print(f"  peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise, [:8])")
+        print(f"  clave Noise = {identidad.noise_public.hex()}")
+        print(f"  tamaño = {len(paquete)} B")
         print(hexdump(paquete))
         limite = car.max_write_without_response_size
         if len(paquete) > limite:
@@ -186,6 +201,12 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--nickname", default="pybitchat-probe",
                    help="nickname del announce (por defecto: pybitchat-probe)")
+    p.add_argument("--identity", type=Path, default=None,
+                   help="fichero de identidad (por defecto: "
+                        "~/.local/share/pybitchat/identity.json)")
+    p.add_argument("--paquete", type=Path, default=None,
+                   help="usar este fichero en vez de construir el announce; "
+                        "permite reenviar bytes capturados tal cual")
     p.add_argument("--segundos", type=float, default=20.0,
                    help="segundos de escucha (por defecto: 20)")
     p.add_argument("--scan", type=float, default=15.0,
@@ -193,6 +214,8 @@ def main() -> int:
     p.add_argument("--timeout", type=float, default=25.0,
                    help="segundos de conexión (por defecto: 25)")
     args = p.parse_args()
+    if args.paquete:
+        args.paquete = args.paquete.read_bytes()
     return asyncio.run(principal(args))
 
 
