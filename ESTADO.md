@@ -15,8 +15,19 @@ alcance). Es una **reimplementación**, no un port de `bitchat-tui`.
 ```powershell
 cd C:\PyBitChat
 $env:PYTHONIOENCODING='utf-8'
-.\.venv\Scripts\python.exe tests\<fichero_de_test>.py
+.\.venv\Scripts\python.exe tools\run_tests.py ; echo "exit=$LASTEXITCODE"
 ```
+
+En Linux, desde la raíz del repo:
+
+```bash
+./.venv/bin/python tools/run_tests.py ; echo "exit=$?"
+```
+
+**Mira el código de salida, no el texto.** Una versión anterior de esta
+documentación usaba un bucle de PowerShell que grepeaba `^OK$` con `-match`, que
+no distingue mayúsculas, y por eso se le escaparon cuatro fallos durante días. Ver §5, punto
+11.
 
 | Fichero | Tests | Cubre |
 |---------|-------|-------|
@@ -257,6 +268,26 @@ que faltaban: H6 `REQUEST_SYNC`, H7 `FILE_TRANSFER`, H8 `VOICE_FRAME`, más el
 
 10. **v1 y v2 están implementadas.** Cabecera de 14 y 16 bytes, longitud u16 y
     u32, ruta opcional sólo en v2. Android emite siempre v1 pero acepta las dos.
+
+11. **`-match` en PowerShell NO distingue mayúsculas.** Lo que más me costó.
+    Durante varias sesiones di por buena una suite de "286 tests en verde"
+    usando `$txt -match '(?m)^OK\s*$'`. Pero los tests que pasan imprimen una
+    línea en minúscula `... ok`, así que el patrón casaba con **cualquier
+    fichero que tuviera un solo test verde**. Cuatro tests llevaban días
+    fallando y el contador daba cero fallos.
+
+    La lección no es "usa `-cmatch`", es **no parsear la salida para decidir si
+    algo pasó**. Para eso está el código de salida del proceso, que no se puede
+    interpretar mal:
+
+    ```
+    .venv\Scripts\python.exe tools\run_tests.py ; echo "exit=$LASTEXITCODE"
+    ./venv/bin/python tools/run_tests.py ; echo "exit=$?"
+    ```
+
+12. **`make_packet` vive en `test_conformance.py`.** Los ficheros de test no se
+    importan entre sí: cada uno es autónomo. Si un test necesita un constructor
+    de paquetes, o está en el fichero de conformidad, o define el suyo.
 
 ---
 

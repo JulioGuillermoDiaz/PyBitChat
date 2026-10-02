@@ -29,12 +29,18 @@ from pybitchat.mesh.transport import (  # noqa: E402
 from pybitchat.protocol import compression  # noqa: E402
 from pybitchat.protocol.compression import CompressionError  # noqa: E402
 from pybitchat.protocol.packet import (  # noqa: E402
+    HEADER_SIZE_BY_VERSION,
+    KNOWN_UPSTREAM_VERSIONS,
+    PROTOCOL_VERSION,
     Packet,
     PacketHeader,
     ProtocolError,
     UnsupportedVersionError,
 )
-from pybitchat.protocol.payloads import max_fragment_data_size  # noqa: E402
+from pybitchat.protocol.payloads import (  # noqa: E402
+    max_fragment_data_size,
+    max_fragment_payload_size,
+)
 from pybitchat.protocol.reassembly import (  # noqa: E402
     MAX_FRAGMENTS_PER_ID,
     Fragment,
@@ -246,23 +252,27 @@ class TestWirePayload(unittest.TestCase):
         self.assertNotEqual(p.to_bytes()[11] & 0x04, 0x04)
 
 
-class TestVersionNoImplementada(unittest.TestCase):
-    def test_v2_da_error_util(self):
-        """v2 es válida en el otro extremo pero aquí no está implementada."""
-        crudo = bytearray(14)
-        crudo[0] = 0x02
-        with self.assertRaises(UnsupportedVersionError) as ctx:
-            Packet.from_bytes(bytes(crudo))
-        self.assertIn("v2", str(ctx.exception))
+class TestVersion(unittest.TestCase):
+    """Lo que no depende de construir un paquete.
 
-    def test_version_desconocida_da_otro_error(self):
-        crudo = bytearray(14)
-        crudo[0] = 0x09
+    El round-trip de v1 y v2 vive en `test_conformance.py`, que tiene el
+    constructor `make_packet`. Aqui solo queda la constante.
+    """
+
+    def test_ambas_versiones_conocidas_estan_implementadas(self):
+        self.assertEqual(KNOWN_UPSTREAM_VERSIONS, frozenset({1, 2}))
+        self.assertEqual(PROTOCOL_VERSION, 1, "Android emite siempre v1")
+
+    def test_tamanos_de_cabecera_por_version(self):
+        """14 en v1 y 16 en v2. `BinaryProtocol.kt:208-209`."""
+        self.assertEqual(HEADER_SIZE_BY_VERSION, {1: 14, 2: 16})
+
+    def test_v3_da_error_util(self):
+        bruto = bytearray(14)
+        bruto[0] = 0x03
         with self.assertRaises(ProtocolError) as ctx:
-            Packet.from_bytes(bytes(crudo))
+            Packet.from_bytes(bytes(bruto))
         self.assertNotIsInstance(ctx.exception, UnsupportedVersionError)
-
-
 # --------------------------------------------------------------------------
 # Fragmentos
 # --------------------------------------------------------------------------
@@ -584,13 +594,21 @@ class TestCalculoDeFragmentos(unittest.TestCase):
         self.assertEqual(max_fragment_data_size(has_recipient=True), 453)
 
     def test_datos_con_un_salto(self):
-        # + 1 byte de cuenta + 8 por salto
-        self.assertEqual(max_fragment_data_size(hops=1), 444)
+        # La ruta aporta 1 byte de cuenta + 8 por salto, sobre 51 de sobre base.
+        self.assertEqual(max_fragment_data_size(hops=1), 461 - 9)
 
     def test_cada_salto_resta_ocho_mas_uno(self):
+        """El byte de cuenta es uno solo, no uno por salto.
+
+        `1 + 8 × saltos`, no `9 × saltos`. Confundirlo daría 461-54=407 en vez
+        de 412 para seis saltos, y el cálculo saldría demasiado conservador.
+        """
         base = max_fragment_data_size()
-        self.assertEqual(max_fragment_data_size(hops=1), base - 9)
-        self.assertEqual(max_fragment_data_size(hops=6), base - 6 * 9)
+        for hops in (1, 2, 6):
+            with self.subTest(hops=hops):
+                self.assertEqual(
+                    max_fragment_data_size(hops=hops), base - (1 + hops * 8)
+                )
 
     def test_nunca_supera_el_maximo_de_fragmento(self):
         for kwargs in ({}, {"has_recipient": True}, {"hops": 1}, {"hops": 6}):
@@ -640,3 +658,7 @@ class TestCalculoDeFragmentos(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+
+
