@@ -1,2 +1,10 @@
 ﻿cryptography>=45
 noiseprotocol>=0.3
+
+# Transporte BLE (Fase 2b). La API es INCOMPATIBLE entre 1.x/2.x y 3.x:
+#   - discover(return_adv=True) devuelve dict en 3.x, list en 1.x
+#   - client.services es propiedad en 3.x, se espera con await en 1.x
+#   - el MTU se pide con client._backend._acquire_mtu() en 3.x
+# Sin fijar la version, una instalacion distinta falla en tiempo de ejecucion y
+# no de importacion, que es mas dificil de diagnosticar.
+bleak>=3.0
