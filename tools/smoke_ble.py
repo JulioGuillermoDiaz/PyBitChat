@@ -101,7 +101,7 @@ async def resolver_telefono(timeout: float):
     """Busca el teléfono por UUID de servicio, sin cachear direcciones."""
     from bleak import BleakScanner
 
-    print(f"buscando el teléfono (announce {SENDER_ID.hex()})…")
+    print("buscando el teléfono…")
     encontrados = await BleakScanner.discover(timeout=timeout, return_adv=True)
     print(f"  {len(encontrados)} dispositivos, {contar_uuids(encontrados)} UUID de servicio")
     for mac, (dev, adv) in encontrados.items():
@@ -110,6 +110,8 @@ async def resolver_telefono(timeout: float):
             return mac, dev, adv
     if not encontrados:
         print("  el adaptador no vio NADA: no es el teléfono")
+    else:
+        print("  hay dispositivos pero ninguno anuncia BitChat")
     return None
 
 
@@ -152,38 +154,58 @@ async def principal(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"    no se pudo decodificar: {type(exc).__name__}: {exc}")
 
-    async with BleakClient(dev, timeout=args.timeout) as cliente:
-        try:
-            await cliente._backend._acquire_mtu()
-        except Exception as exc:
-            print(f"  _acquire_mtu falló: {exc}")
-        print(f"  conectado. MTU = {cliente.mtu_size}")
+    print(f"  conectando a {mac} (timeout {args.timeout}s)…")
+    try:
+        async with BleakClient(dev, timeout=args.timeout) as cliente:
+            return await _sesion(cliente, args, identidad, recibidos, al_recibir)
+    except TimeoutError:
+        print("\nTIMEOUT al conectar.")
+        print("El escaneo funciona, así que el radio ve al teléfono; lo que falla")
+        print("es el establecimiento del enlace. Causas habituales:")
+        print("  - Quedó una conexión GATT colgada de una ejecución anterior.")
+        print("    Se limpia con:  bluetoothctl devices Connected")
+        print("                    bluetoothctl remove <MAC>")
+        print("  - Android ya está conectado a otro cliente de este adaptador.")
+        print("  - Reintentar: a veces basta con volver a lanzarlo.")
+        raise SystemExit(2)
 
-        await cliente.start_notify(CHARACTERISTIC_UUID, al_recibir)
-        print("  notificaciones activadas")
 
-        car = cliente.services.get_characteristic(CHARACTERISTIC_UUID)
-        if car is None:
-            print("  el teléfono no expone el characteristic de BitChat")
-            return 1
+async def _sesion(cliente, args, identidad, recibidos, al_recibir) -> int:
+    try:
+        await cliente._backend._acquire_mtu()
+    except Exception as exc:
+        print(f"  _acquire_mtu falló: {exc}")
+    print(f"  conectado. MTU = {cliente.mtu_size}")
 
-        paquete = args.paquete or identidad.announce_packet(ttl=3)
-        print(f"\nenviando ANNOUNCE de {args.nickname!r}")
-        print(f"  peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise, [:8])")
-        print(f"  clave Noise = {identidad.noise_public.hex()}")
-        print(f"  tamaño = {len(paquete)} B")
-        print(hexdump(paquete))
-        limite = car.max_write_without_response_size
-        if len(paquete) > limite:
-            print(f"\nERROR: excede el máximo escribible ({limite} B). "
-                  f"MTU no negociado bien.")
-            return 1
-        await cliente.write_gatt_char(car, paquete, response=False)
-        print("  enviado")
+    await cliente.start_notify(CHARACTERISTIC_UUID, al_recibir)
+    print("  notificaciones activadas")
 
-        print(f"\nescuchando {args.segundos} s…")
-        await asyncio.sleep(args.segundos)
+    car = cliente.services.get_characteristic(CHARACTERISTIC_UUID)
+    if car is None:
+        print("  el teléfono no expone el characteristic de BitChat")
+        return 1
 
+    paquete = args.paquete or identidad.announce_packet(ttl=3)
+    print(f"\nenviando ANNOUNCE de {args.nickname!r}")
+    print(f"  peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise, [:8])")
+    print(f"  clave Noise = {identidad.noise_public.hex()}")
+    print(f"  tamaño = {len(paquete)} B")
+    print(hexdump(paquete))
+    limite = car.max_write_without_response_size
+    if len(paquete) > limite:
+        print(f"\nERROR: excede el máximo escribible ({limite} B). "
+              f"MTU no negociado bien.")
+        return 1
+    await cliente.write_gatt_char(car, paquete, response=False)
+    print("  enviado")
+
+    print(f"\nescuchando {args.segundos} s…")
+    await asyncio.sleep(args.segundos)
+
+    return _informe(recibidos)
+
+
+def _informe(recibidos: list[bytes]) -> int:
     print(f"\n{'=' * 60}")
     print(f"total de paquetes recibidos: {len(recibidos)}")
     if not recibidos:
