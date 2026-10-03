@@ -175,28 +175,44 @@ relleno, pero **ningún `NOISE_HANDSHAKE` (0x10)**.
 (`ble/advertiser.py`). Si ahora sí lo anuncia y sigue sin handshake, el motivo
 será otro y habrá que Investigarlo.
 
-### 3.2 Relleno: **resuelto** con datos, contra el código de la app
+### 3.2 Relleno: NO es PKCS#7 — corrección de un error propio
 
-`BLEPacketPaddingPolicy.shouldPadForBLE` dice que **sólo** se rellenan las
-tramas Noise, y se usa de verdad (`BluetoothPacketBroadcaster.kt:215, 237, 350`).
+**Retirada una afirmación que estaba en el código y en este documento:** que el
+relleno era "PKCS#7 exacto, la longitud del relleno es el valor del byte". Es
+**falso**, y se vio al medir los números de la captura del 3-oct:
 
-Los paquetes capturados desmienten eso: ninguno es Noise y **todos vienen
-rellenos**. Con la captura de hoy, dos casos más:
-
-| Paquete | Contenido | Relleno | Byte |
+| Paquete | Real | Relleno hasta 256 B | Byte de relleno |
 |---|---|---|---|
-| ANNOUNCE | 166 B | 90 B | `0x5a` = 90 |
-| filler | 96 B | 160 B | `0xa0` = 160 |
-| ANNOUNCE (hoy) | 166 B | 90 B | `0x5a` = 90 |
-| REQUEST_SYNC (hoy) | 102 B | 154 B | `0x9a` = 154 |
+| ANNOUNCE (3-oct) | 102 B | 154 B | `0x5a` = 90 |
+| REQUEST_SYNC (3-oct) | 38 B | 218 B | `0x9a` = 154 |
 
-El relleno es **PKCS#7 exacto**: el byte de relleno **es** la longitud del
-relleno, en los cuatro casos. Y el destino son **256 B** en todos ellos.
+154 ≠ 90 y 218 ≠ 154. En ambos casos la longitud **no** coincide con el byte.
 
-Conclusión provisional: se rellena hasta 256 B, por longitud, **sea Noise o
-no**. La función `should_pad_for_ble()` sigue sin tocarse —ver §6— pero ahora
-la contradicción está caracterizada, no sólo observada: sabemos **qué** hace
-el relleno, aunque el código diga que no debería hacerlo.
+**De dónde salió el error:** en `test_identity.py` el caso se escribía como
+`14 + 8 + 80 + 64 = 166`. Los **64** eran una firma de 64 bytes **supuesta**, no
+medida. Con ese 64 inventado, el relleno salía de 90 B y `0x5a` = 90 "cuadraba"
+perfectamente. Era aritmética circular: el dato que hacía cuadrar el PKCS#7 era
+el dato inventado.
+
+Con los bytes reales de hoy, la estructura del announce es:
+
+```
+102 B reales + 154 B hasta 256 = 256 B
+  14 cabecera + 8 sender + 80 payload TLV   (todo declarado)
+  + 64 bytes que la cabecera NO declara
+  + relleno hasta 256
+```
+
+Esos **64 bytes no son relleno**. Son 64 bytes entre el payload y el final,
+distintos de `0x5a`, y 64 es exactamente el tamaño de una firma Ed25519 — y la
+app manda `0x03` = clave de firma. **Probado y NO valida** como firma sobre
+ninguno de los cinco mensajes candidatos (cabecera+sender, +payload, payload
+solo, TLV sin la clave, sender solo). Descarta el mensaje, no la idea: falta
+saber **de qué** firma.
+
+Conclusión provisional: se rellena hasta **256 B**, y hay un campo de 64 B que
+`payload_len` no describe. `should_pad_for_ble()` sigue sin tocarse (§6) y el
+conflicto con la app sigue abierto, pero ahora está bien caracterizado.
 
 ### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
 

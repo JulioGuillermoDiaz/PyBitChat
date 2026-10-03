@@ -535,34 +535,140 @@ class TestRellenoObservado(unittest.TestCase):
     """
 
     #: (nombre, contenido, longitud total, byte de relleno observado)
+    #:
+    #: **El `contenido` de estas filas lo daba un cálculo, no una medición.** El
+    #: caso del ANNOUNCE era `14 + 8 + 80 + 64`: los 64 eran una firma
+    #: **supuesta**. Con ese número inventado el relleno salía de 90 B y
+    #: `0x5a` = 90 "cuadraba" — era aritmética circular.
+    #:
+    #: Con los bytes reales del 3-oct el announce son **102 B** (14 + 8 + 80, todo
+    #: declarado), luego el relleno hasta 256 son **154 B**, y `0x5a` = 90 no
+    #: coincide. Por eso estas filas ya **no** dicen "PKCS#7": ver
+    #: `test_el_relleno_no_es_pkcs7`.
     CASOS = (
-        # ANNOUNCE: 14 + 8 sender + 80 payload + 64 firma = 166. Todo explicado.
-        ("ANNOUNCE 0x01", 14 + 8 + 80 + 64, 256, 0x5A),
+        # ANNOUNCE: 14 + 8 sender + 80 payload = 102, **todo declarado**. Relleno
+        # 154 B con byte 0x5a=90: no es PKCS#7, y entre el payload y el final
+        # hay 64 bytes más que la cabecera no declara.
+        ("ANNOUNCE 0x01", 102, 256, 0x5A, False),
         # MESSAGE: la cabecera declara payload_len=2, o sea 24 B, pero el relleno
-        # implica 96 B de contenido. Sobran 72 bytes de 0xff sin explicar.
-        ("MESSAGE 0x02", 96, 256, 0xA0),
+        # implica 96 B de contenido. Sobran 72 bytes de 0xff sin explicar. Aquí
+        # sí cuadra PKCS#7: 160 B de relleno, byte 0xa0 = 160.
+        ("MESSAGE 0x02", 96, 256, 0xA0, True),
     )
 
     #: Bytes de `0xff` entre el payload y el relleno en el segundo paquete.
     RELLENO_FF_SIN_EXPLICAR = 72
 
-    def test_el_byte_de_relleno_es_la_longitud_del_relleno(self):
-        for nombre, contenido, total, byte in self.CASOS:
+    def test_el_relleno_no_siempre_es_pkcs7(self):
+        """El `ANNOUNCE` **no** es PKCS#7; el `MESSAGE` sí lo es.
+
+        Decir "el relleno es PKCS#7" era una afirmación falsa que estuvo en el
+        docstring de `should_pad_for_ble` y en `ESTADO.md`. El caso del ANNOUNCE
+        no cuadra:
+
+            ANNOUNCE      real 102 B -> relleno 154 B, byte 0x5a = 90   NO
+            REQUEST_SYNC  real  38 B -> relleno 218 B, byte 0x9a = 154  NO
+            MESSAGE       real  96 B -> relleno 160 B, byte 0xa0 = 160  sí
+
+        Los dos que fallan son los del announce. La diferencia es que el
+        announce lleva 64 bytes que la cabecera no declara antes del relleno, y
+        no son un byte constante. Si alguien "arregla" esto para que todo cuadre
+        con PKCS#7, este test falla.
+        """
+        for nombre, contenido, total, byte, es_pkcs7 in self.CASOS:
             with self.subTest(paquete=nombre):
                 relleno = total - contenido
-                self.assertEqual(byte, relleno)
-                self.assertEqual(contenido + relleno, total)
+                coincide = byte == relleno
+                self.assertEqual(
+                    coincide, es_pkcs7,
+                    f"{nombre}: byte 0x{byte:02x}={byte}, relleno {relleno} B, "
+                    f"esperado es_pkcs7={es_pkcs7}. Si ha cambiado, revisa si "
+                    "el contenido está medido o calculado.",
+                )
 
-    def test_nuestro_pkcs7_da_los_mismos_bytes(self):
+    def test_el_anounce_real_mide_102_bytes(self):
+        """El contenido del ANNOUNCE son 102 B, medidos, no calculados.
+
+        14 de cabecera + 8 de sender + 80 de payload TLV. Los tres campos los
+        declara la propia cabecera, así que no hay nada supuesto aquí. Es lo que
+        hace que el caso de arriba sea 102 y no 166.
+        """
+        ANNOUNCE_REAL = (
+            bytes.fromhex("010107000001a10310526d02005034e01ccea10a8c6d")
+            + bytes.fromhex("010a616e6577656c6c733734")
+            + bytes.fromhex(
+                "0220973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b"
+            )
+            + bytes.fromhex(
+                "03207ada9dab1bec9eb274cfaa0e3489b259d3219f069fe84cb694aa7c5871a61a88"
+            )
+        )
+        self.assertEqual(len(ANNOUNCE_REAL), 102)
+        # `payload_len` es el byte 13 de la cabecera: 0x50 = 80. Comprobado
+        # contra nuestro propio paquete, que declara 0x59 = 89 y realmente
+        # ocupa 89 B. No es u16 en 12:14 (eso daría 20480), ni u16 en 11:13
+        # (2). Este test existe porque se dio por bueno un offset equivocado
+        # antes, dos veces seguidas.
+        payload_len = ANNOUNCE_REAL[13]
+        self.assertEqual(payload_len, 80)
+        self.assertEqual(len(ANNOUNCE_REAL) - 22, payload_len)
+
+    def test_hay_64_bytes_que_la_cabecera_no_declara(self):
+        """El announce ocupa 256 B y sólo declara 102. Los 64 que faltan.
+
+        Empiezan justo tras el payload y no son `0x5a` constante. 64 es el
+        tamaño de una firma Ed25519, y la app manda `0x03` = clave de firma, así
+        que la hipótesis más fuerte es que es una firma. **Probado y no
+        valida** sobre los cinco mensajes candidatos, así que se documenta como
+        campo sin explicar y no como firma.
+        """
+        RELLENO_INICIAL = bytes.fromhex(
+            "de0a272249f517047a1c976910a65096bd5a9056c3d7ea73c12aec2123"
+            "6879b7a8a0ab8e497701b075175117d8704ad4989a2f3dcba85db14fae"
+            "64f5441d1a01"
+        )
+        self.assertEqual(len(RELLENO_INICIAL), 64)
+        # No es un bloque constante: si lo fuera, sería relleno.
+        self.assertGreater(len(set(RELLENO_INICIAL)), 16)
+
+    def test_el_relleno_llega_a_256(self):
+        """Lo único que se afirma del relleno es que **tope en 256 B**.
+
+        No se afirma el byte, porque no siempre es la longitud: ver
+        `test_el_relleno_no_siempre_es_pkcs7`.
+        """
+        for nombre, contenido, total, byte, es_pkcs7 in self.CASOS:
+            with self.subTest(paquete=nombre):
+                relleno = total - contenido
+                self.assertEqual(contenido + relleno, total)
+                self.assertEqual(total, 256)
+
+    def test_nuestro_pkcs7_no_reproduce_el_relleno_del_announce(self):
+        """Nuestro emisor usa PKCS#7 y **no** es lo que hace la app.
+
+        Se conserva el test, pero cambiado de afirmación: antes decía que
+        reproducía los mismos bytes del announce, y no puede decir eso. Ahora
+        fija la diferencia, que es lo que hay que saber al comparar capturas.
+        """
         from pybitchat.protocol.packet import pkcs7_pad_to_bucket
 
-        for nombre, contenido, total, byte in self.CASOS:
+        for nombre, contenido, total, byte, es_pkcs7 in self.CASOS:
             with self.subTest(paquete=nombre):
-                relleno = pkcs7_pad_to_bucket(bytes(contenido))
-                self.assertEqual(len(relleno), total)
-                self.assertEqual(relleno[-1], byte)
-                # Y es todo el mismo byte, no un último byte suelto.
-                self.assertEqual(set(relleno[contenido:]), {byte})
+                # Devuelve `datos + relleno`, no sólo el relleno.
+                original = bytes(contenido)
+                emitted = pkcs7_pad_to_bucket(original)
+                relleno_real = len(emitted) - len(original)
+                # El tope a 256 B sí coincide siempre: es lo único que sabemos
+                # reproducir bien.
+                self.assertEqual(len(emitted), total)
+                # PKCS#7 pone la longitud del relleno como último byte.
+                self.assertEqual(emitted[-1], relleno_real)
+                if es_pkcs7:
+                    # Para el MESSAGE, eso coincide con lo que hizo la app.
+                    self.assertEqual(byte, relleno_real)
+                else:
+                    # Para el announce, no: ahí es donde difieren.
+                    self.assertNotEqual(byte, relleno_real)
 
     def test_el_segundo_paquete_tiene_72_bytes_sin_explicar(self):
         """El caso abierto: la cabecera no describe todo el contenido.
@@ -573,7 +679,7 @@ class TestRellenoObservado(unittest.TestCase):
         del emisor, un campo que la cabecera no declara, o un artefacto. Se deja
         anotado en vez de inventar una explicación.
         """
-        _, contenido, _, _ = self.CASOS[1]
+        _, contenido, _, _, _ = self.CASOS[1]
         explicado = 14 + 8 + 2
         self.assertEqual(contenido - explicado, self.RELLENO_FF_SIN_EXPLICAR)
 

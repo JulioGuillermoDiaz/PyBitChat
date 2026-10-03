@@ -207,19 +207,40 @@ def should_pad_for_ble(msg_type: int) -> bool:
 
     ## Aviso: contradicción sin resolver con el tráfico real
 
-    El 2026-10-02 se capturaron paquetes de la app Android que **sí** vienen
-    rellenados, y no son tramas Noise:
+    Los paquetes capturados de la app Android (2026-10-02 y 2026-10-03) **sí**
+    vienen rellenados, y no son tramas Noise:
 
-    | Paquete | Tipo        | Contenido | Relleno | Byte         |
-    |---------|-------------|-----------|---------|--------------|
-    | 1       | ANNOUNCE    | 166 B     | 90 B    | `0x5a` = 90  |
-    | 2       | MESSAGE     | 96 B      | 160 B   | `0xa0` = 160 |
+    | Paquete     | Tipo          | Real  | Relleno | Byte         |
+    |-------------|---------------|-------|---------|--------------|
+    | 02 oct      | ANNOUNCE      | 166 B | 90 B    | `0x5a` = 90  |
+    | 02 oct      | filler        | 96 B  | 160 B   | `0xa0` = 160 |
+    | 03 oct      | ANNOUNCE      | 102 B | 154 B   | `0x5a` = 90  |
+    | 03 oct      | REQUEST_SYNC  | 38 B  | 218 B   | `0x9a` = 154 |
 
-    El relleno es PKCS#7 exacto: la longitud del relleno **es** el valor del
-    byte, y el total cae en el siguiente cubo. No es basura ni resto de buffer.
+    **Corrección importante.** Antes aquí se afirmaba que el relleno era
+    "PKCS#7 exacto: la longitud del relleno es el valor del byte". **Es
+    falso**, y sólo se vio al medir los números de las capturas:
 
-    Pero por esas rutas, para un ANNOUNCE la política da `false` y no debería
-    haber relleno. Hay tres salidas posibles y **ninguna comprobada**:
+    - ANNOUNCE del 03 oct: 256 − 102 = **154** B de relleno, byte `0x5a` = 90.
+    - REQUEST_SYNC del 03 oct: 256 − 38 = **218** B de relleno, byte
+      `0x9a` = 154.
+
+    En ambos casos la longitud **no** coincide con el byte. La conclusión
+    "PKCS#7 exacto" se dedujo de mirar `0x5a` y pensar "90 = 0x5a" sin contar
+    cuántos bytes de relleno había. El 0x5a aparece en la segunda captura
+    porque el contenido es el mismo, no porque sea longitud.
+
+    Lo que sí se puede afirmar, con las cuatro capturas:
+
+    - El destino es **256 B** en todos los casos.
+    - El relleno **no** es PKCS#7 ni repite un byte constante.
+    - El relleno parece **aleatorio**: en el ANNOUNCE del 03 oct hay 25 bytes
+      distintos tras los 90 `0x5a` finales, que no son ni `0x5a` ni un valor
+      constante.
+
+    Por esas rutas, para un ANNOUNCE la política da `false` y no debería haber
+    relleno. Las salidas posibles siguen siendo las mismas, **ninguna
+    comprobada**:
 
     1. Esos paquetes salieron por una ruta distinta de las tres del broadcaster.
     2. `toBinaryData` rellena igual, o hay otro relleno aguas arriba.
@@ -230,8 +251,11 @@ def should_pad_for_ble(msg_type: int) -> bool:
     queda escrito aquí. Cuando se sepa de dónde salieron esos paquetes se
     corrige, con la explicación al lado.
 
-    Lo que sí está confirmado contra tráfico real es el relleno *cuando lo hay*:
-    `pkcs7_pad_to_bucket` produce byte a byte los mismos 0x5a y 0xa0.
+    `pkcs7_pad_to_bucket` sigue siendo lo que usa el emisor. **No reproduce el
+    relleno real de la app** —no es PKCS#7—, así que el announce que mandamos
+    lleva un relleno distinto del que ella manda. No ha dado ningún fallo
+    porque la app acepta el paquete: el relleno es transporte, no carga útil,
+    y se descarta al descomprimir.
 
     Nota: `bitchat-tui` rellenaba **todo** a cubos (`packet_creation.rs`) y sus
     vectores de 2025 muestran un announce de 256 B con 39 reales.

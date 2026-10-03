@@ -538,10 +538,22 @@ class Packet:
 def pkcs7_pad_to_bucket(data: bytes, buckets: tuple[int, ...] = PADDING_BUCKETS) -> bytes:
     """Rellena `data` al siguiente cubo de `buckets` con bytes PKCS#7.
 
-    La app oficial rellena con bytes aleatorios y el último byte igual a la
-    longitud del relleno (`packet_creation.rs:46-55`). La longitud del
-    relleno debe caber en un byte, así que un payload que necesite más de
-    255 bytes de relleno se emite sin rellenar.
+    ⚠️ **Esto no reproduce lo que hace la app Android.** Se verificó el
+    2026-10-03 con un announce real:
+
+        ANNOUNCE      102 B reales -> 154 B de relleno, byte final 0x5a = 90
+        REQUEST_SYNC   38 B reales -> 218 B de relleno, byte final 0x9a = 154
+        MESSAGE        96 B reales -> 160 B de relleno, byte final 0xa0 = 160
+
+    El `MESSAGE` sí coincide con PKCS#7. Los otros dos **no**: su byte final no
+    es la longitud del relleno. En el announce, además, hay 64 bytes entre el
+    payload y el relleno que la cabecera no declara y que no son un byte
+    constante.
+
+    La función se mantiene como está porque es lo que hace el emisor y cambiar
+    la relleno sin saber cuál es el correcto sería sustituir una afirmación sin
+    verificar por otra. No ha dado fallos: la app acepta nuestros paquetes y el
+    relleno es transporte, no carga útil, así que se descarta al descomprimir.
 
     Nota: la implementación de referencia usa *bytes aleatorios* aquí pero
     *byte repetido* en `command_handling.rs:326`. Es una inconsistencia
