@@ -43,6 +43,18 @@ async def principal(args: argparse.Namespace) -> int:
     ok = await anuncio.start()
     if not ok:
         print(f"\nNO se pudo anunciar: {anuncio.ultimo_error}")
+        # Se imprime lo que se mandó. BlueZ rechaza por el *contenido* del
+        # anuncio, y sin verlo no hay forma de saber qué campo disliked.
+        print("\nOpciones enviadas (con su firma D-Bus):")
+        from pybitchat.ble.advertiser import opciones_anuncio
+
+        for scan in (True, False):
+            print(f"\n  intento con scan_response={scan}:")
+            for clave, valor in opciones_anuncio(
+                identidad.peer_id, scan_response=scan
+            ).items():
+                print(f"    {clave:32} Variant({valor.signature!r}, {valor.value!r})")
+
         print("\nCausas habituales:")
         print("  - BlueZ sin permiso de advertising. Se comprueba con:")
         print("      bluetoothctl list")

@@ -89,6 +89,57 @@ def _adaptador() -> str:
     return os.environ.get("BLUEZ_ADAPTER", "hci0")
 
 
+#: Firmas D-Bus de los valores del diccionario de opciones.
+SIG_TEXTO = "s"        # cadena
+SIG_LISTA = "as"       # lista de cadenas
+SIG_BYTES = "ay"       # lista de bytes
+SIG_DICT = "a{sv}"     # dict de cadena -> Variant
+
+
+class _VariantSimple:
+    """Sustituto de `dbus_fast.Variant` cuando la librería no está.
+
+    El objetivo es que `opciones_anuncio()` se pueda probar, y leer, en cualquier
+    máquina: `dbus_fast` sólo se instala en Linux, y este proyecto se desarrolla
+    además sobre Windows.
+
+    Guarda firma y valor por separado, igual que la clase real, de modo que un
+    test puede afirmar *qué* firma lleva cada campo sin tener la librería. Al
+    mandar el mensaje, BlueZ recibe lo que `dbus_fast` construya de verdad; aquí
+    nunca se manda nada, sólo se describe la forma.
+    """
+
+    __slots__ = ("signature", "value")
+
+    def __init__(self, signature: str, value: Any) -> None:
+        self.signature = signature
+        self.value = value
+
+    def __eq__(self, otro: object) -> bool:
+        return (
+            isinstance(otro, _VariantSimple)
+            and self.signature == otro.signature
+            and self.value == otro.value
+        )
+
+    def __repr__(self) -> str:
+        return f"Variant({self.signature!r}, {self.value!r})"
+
+
+def _variant_cls():
+    """`dbus_fast.Variant` si está, y el sustituto si no.
+
+    Importar `dbus_fast` arriba del todo del módulo haría que `ble.advertiser`
+    fuera inimportable fuera de Linux, que es donde no se puede ni probar ni
+    usar. La dependencia se resuelve en el punto de uso.
+    """
+    try:
+        from dbus_fast import Variant
+    except ImportError:
+        return _VariantSimple
+    return Variant
+
+
 def opciones_anuncio(
     peer_id: bytes,
     *,
@@ -98,23 +149,47 @@ def opciones_anuncio(
     """Construye el diccionario de opciones de `RegisterAdvertisement`.
 
     `peer_id` son los 8 bytes del identificador. No el nombre, no la MAC.
+
+    ## Por qué devuelve `Variant` y no valores pelados
+
+    La firma de BlueZ es `RegisterAdvertisement(o, a{sv})`, y `a{sv}` es
+    **dict de cadena a Variant**. Es decir: *cada valor* del dict tiene que ser
+    un `Variant`, no el valor en sí.
+
+    Pasando un dict normal falla con
+
+        TypeError: Cannot convert str to dbus_fast.signature.Variant
+
+    porque `dbus_fast` valida el cuerpo antes de mandarlo
+    (`signature.py:319-324`, `_verify_variant`).
+
+    Los bytes van como `ay` y no como `s`: el peer_id son 8 bytes binarios, y
+    mandarlos como cadena los convertiría en texto y el receptor leería otra
+    cosa. `dbus_fast` distingue `ay` (bytes) de `as` (lista de cadenas) en
+    `signature.py:291-296`.
     """
+    Variant = _variant_cls()
+
     if len(peer_id) != 8:
         raise ValueError(f"el peer_id debe medir 8 bytes, tiene {len(peer_id)}")
 
+    servicio_txt = str(servicio)
+    datos = {servicio_txt: Variant(SIG_BYTES, bytes(peer_id))}
+
     base: dict[str, Any] = {
-        "Type": "peripheral",
-        "ServiceUUIDs": [str(servicio)],
-        # Se declara `ServiceData` en vez de `ScanResponseServiceData` según
-        # `scan_response`, porque BlueZ los trata en campos distintos.
-        ("ScanResponseServiceData" if scan_response else "ServiceData"): {
-            str(servicio): bytes(peer_id)
-        },
+        "Type": Variant(SIG_TEXTO, "peripheral"),
+        "ServiceUUIDs": Variant(SIG_LISTA, [servicio_txt]),
     }
+    # Se declara `ServiceData` o `ScanResponseServiceData` según `scan_response`,
+    # porque BlueZ los trata en campos distintos: el primero va en el paquete de
+    # advertising y el segundo en el scan response.
+    base["ScanResponseServiceData" if scan_response else "ServiceData"] = Variant(
+        SIG_DICT, datos
+    )
     if scan_response:
         # Duplicar el UUID en el scan response ayuda a algunos escáneres, que
         # leen el UUID sólo de ahí.
-        base["ScanResponseServiceUUIDs"] = [str(servicio)]
+        base["ScanResponseServiceUUIDs"] = Variant(SIG_LISTA, [servicio_txt])
     return base
 
 
@@ -303,6 +378,10 @@ __all__ = [
     "NOMBRE_SERVICIO",
     "RUTA_ANUNCIO",
     "RUTA_SERVICIO",
+    "SIG_BYTES",
+    "SIG_DICT",
+    "SIG_LISTA",
+    "SIG_TEXTO",
     "Advertiser",
     "opciones_anuncio",
 ]
