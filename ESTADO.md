@@ -1,8 +1,12 @@
 # Estado del proyecto — punto de reanudación
 
-**Fecha de corte:** 2026-10-02
+**Fecha de corte:** 2026-10-03
 **Objetivo:** cliente BitChat en Python para **Android + Linux** (iOS fuera de
 alcance). Es una **reimplementación**, no un port de `bitchat-tui`.
+
+**En una línea:** el enlace BLE funciona en las dos direcciones contra la app
+Android real, y la identidad se intercambia y se decodifica. **Falta el
+handshake Noise**, que es lo único que queda para cerrar el enlace.
 
 > ⚠️ **Antes de nada:** no se porta `bitchat-tui`. Habla un dialecto retirado, así
 > que portarlo daría un cliente incapaz de hablar con ninguna app actual. Ver
@@ -10,103 +14,66 @@ alcance). Es una **reimplementación**, no un port de `bitchat-tui`.
 
 ---
 
-## 1. Dónde estamos: **el enlace BLE funciona en las dos direcciones**
+## 1. Donde estamos: **el enlace funciona y la identidad se intercambia**
 
-Esto es lo importante y no estaba previsto al empezar el día: se ha **verificado
-con tráfico real de la app Android**, no con captura del Rust ni con lectura del
-código.
+Se ha verificado con **trafico real de la app Android**, no con captura del Rust
+ni con lectura del codigo.
 
 | | Estado |
 |---|---|
 | Codec de payloads, v1 y v2 | ✅ |
 | Noise XX handshake (Cacophony/Noise-C) | ✅ 39 vectores |
 | Conformidad con los tests de la app | ✅ 48 casos portados |
-| **Descubrimiento del teléfono** | ✅ **visto en 6 direcciones distintas** |
-| **Conexión GATT sin emparejar** | ✅ |
+| **Descubrimiento del telefono** | ✅ **visto en 9 direcciones distintas** |
+| **Conexion GATT sin emparejar** | ✅ |
 | **MTU 517** | ✅ coincide con Android 14+ |
-| **Recepción de paquetes reales** | ✅ 4 paquetes decodificados |
-| **Envío de identidad válida** | ✅ la app responde, sin handshake todavía |
-| **Anuncio como peripheral** | ✅ **funciona** — BlueZ lo acepta, `ce990ff` |
-| Handshake Noise con la app real | ❌ **falta** |
+| **Anuncio como peripheral** | ✅ **funciona** - BlueZ lo acepta, `ce990ff` |
+| **Envio de identidad valida** | ✅ **la app responde con la suya** |
+| **Decodificacion del announce** | ✅ TLV de identidad, `63154e3` |
+| `peer_id` derivado de la clave | ✅ confirmado contra trafico real |
+| Relleno PKCS#7 a 256 B | ✅ confirmado en 4 capturas |
+| **Handshake Noise con la app real** | ❌ **falta - es lo unico que queda** |
 
 ### El hito del 2026-10-03
 
-Primera sesión en que **la app responde a nuestro announce con el suyo**. Antes
-se enviaba identidad y no venía nada; hoy el intercambio es completo:
+Primera sesion en que **la app responde a nuestro announce con el suyo**, y en
+que lo leemos bien. El intercambio de identidad es completo:
 
 ```
 enviando ANNOUNCE de 'pybitchat-probe'   111 B   -> enviado
---- paquete recibido: 256 B (nº 1) ---    tipo=0x01(ANNOUNCE)  payload=80 B
---- paquete recibido: 256 B (nº 2) ---    tipo=0x01(ANNOUNCE)  payload=80 B
---- paquete recibido: 256 B (nº 3) ---    tipo=0x21(REQUEST_SYNC)  carga OK
+--- paquete recibido: 256 B (nº 1) ---  ANNOUNCE      payload 80, firma 64
+--- paquete recibido: 256 B (nº 2) ---  ANNOUNCE      payload 80, firma 64
+--- paquete recibido: 256 B (nº 3) ---  REQUEST_SYNC  carga OK
 total de paquetes recibidos: 3
 ```
 
-**El `ANNOUNCE` que nos llega es TLV, y ahí hay un bug nuestro.** Los 80 B son
-`[tipo u8][longitud u8][valor]`:
+Decodificado con los bytes reales:
 
 ```
-01 0a 61 6e 65 77 65 6c 6c 73 37 34   -> 0x01 nickname, "anewells74"
-02 20 97 35 85 b6 50 28 36 ff ...     -> 0x02 clave Noise, 32 B
-03 20 7a da 9d ab 1b ec 9e b2 ...     -> 0x03 clave de firma, 32 B
+nickname       = 'anewells74'
+noise_public   = 973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b
+signing_public = 7ada9dab1bec9eb274cfaa0e3489b259d3219f069fe84cb694aa7c5871a61a88
+peer_id derivado = 34e01ccea10a8c6d  == sender_id del paquete
 ```
 
-`AnnouncePayload` (`payloads.py:69`) trata el payload **sólo como nickname en
-UTF-8**, que es la forma legacy. De ahí el `UnicodeDecodeError` en la posición
-14: justo donde empieza la clave binaria. Está documentado como "decodificado
-y validado", pero se validó con vectores de 8-9 bytes, demasiado cortos para
-contener una clave. El formato TLV **ya existe y está probado** en
-`identity.py`, con el announce real de 80 B.
+Lo del `peer_id` es la prueba buena: sale de `sha256(clave Noise)[:8]` y
+coincide con el `sender_id` **sin que nadie lo haya puesto ahi**. Si el TLV
+estuviera mal leido, no saldria.
 
-**El announce que enviamos nosotros sí es correcto** —la app respondió— así que
-lo único pendiente aquí es saber leer el suyo.
+Los paquetes se guardan en `capturas/recibido.bin`, asi que el trabajo de
+decodificar se hace sobre los bytes y no sobre el terminal.
 
-### Lo que seMidió contra el teléfono
-| Handshake Noise con la app real | ❌ **falta** |
+### Lo que se midio contra el telefono
 
-| **Anuncio como peripheral** | ✅ **funciona** — BlueZ lo acepta, `ce990ff` |
-| Handshake Noise con la app real | ❌ **falta** |
-
-### El hito del 2026-10-03
-
-Primera sesión en que **la app responde a nuestro announce con el suyo**. Antes
-se enviaba identidad y no venía nada; hoy el intercambio es completo:
-
-```
-enviando ANNOUNCE de 'pybitchat-probe'   111 B   -> enviado
---- paquete recibido: 256 B (nº 1) ---    tipo=0x01(ANNOUNCE)  payload=80 B
---- paquete recibido: 256 B (nº 2) ---    tipo=0x01(ANNOUNCE)  payload=80 B
---- paquete recibido: 256 B (nº 3) ---    tipo=0x21(REQUEST_SYNC)  carga OK
-total de paquetes recibidos: 3
-```
-
-**El `ANNOUNCE` que nos llega es TLV, y ahí hay un bug nuestro.** Los 80 B son
-`[tipo u8][longitud u8][valor]`:
-
-```
-01 0a 61 6e 65 77 65 6c 6c 73 37 34   -> 0x01 nickname, "anewells74"
-02 20 97 35 85 b6 50 28 36 ff ...     -> 0x02 clave Noise, 32 B
-03 20 7a da 9d ab 1b ec 9e b2 ...     -> 0x03 clave de firma, 32 B
-```
-
-`AnnouncePayload` (`payloads.py:69`) trata el payload **sólo como nickname en
-UTF-8**, que es la forma legacy. De ahí el `UnicodeDecodeError` en la posición
-14: justo donde empieza la clave binaria. Está documentado como "decodificado
-y validado", pero se validó con vectores de 8-9 bytes, demasiado cortos para
-contener una clave. El formato TLV **ya existe y está probado** en
-`identity.py`, con el announce real de 80 B.
-
-**El announce que enviamos nosotros sí es correcto** —la app respondió— así que
-lo único pendiente aquí es saber leer el suyo.
-
-### Lo que seMidió contra el teléfono
-
-- Servicio `F47B5E2D-…` y characteristic `A1B2C3D4-…`, sin emparejar.
+- Servicio `F47B5E2D-...` y characteristic `A1B2C3D4-...`, sin emparejar.
 - **MTU 517** tras `_acquire_mtu()`. El valor por defecto de BlueZ es **23**, y
-  sin pedirlo el envío grande falla en silencio.
-- **Las MAC rotan**: seis direcciones distintas en seis escaneos. Es 地址 privada
-  resoluble de Android. Por eso `bleak_transport` resuelve por UUID en cada
-  conexión y no cachea nada.
+  sin pedirlo el envio grande falla en silencio.
+- **Las MAC rotan**: nueve direcciones distintas en nueve escaneos. Es una
+  direccion privada resoluble de Android. Por eso `bleak_transport` resuelve
+  por UUID en cada conexion y no cachea nada.
+- El movil anuncia BitChat con **2-3 MACs a la vez**, todas con el UUID de
+  servicio. Se elige la de mayor RSSI **medido**; `-127` es el valor por defecto
+  de bleak cuando BlueZ no mide (`scanner.py:209`), no una senal mala.
 
 ## 2. Los cuatro hallazgos que cambiaron el diseño
 
@@ -296,109 +263,115 @@ cuando la app pasa a segundo plano.
 | Fichero | Qué prueba |
 |---|---|
 | `tools/smoke_ble.py` | Conecta, envía announce, registra lo que llega |
-| `tools/probe_advertise.py` | Anuncia y escanea, para ver si nos finds |
+| `tools/probe_advertise.py` | Anuncia y escanea, para ver si nos encuentra |
 | `tools/extract_vectors.py` | Regenera `tests/fixtures/vectors.json` |
+
+Opciones útiles de `smoke_ble.py`:
+
+| Opción | Por qué |
+|---|---|
+| `--scan 30` | el escaneo corto es la causa más fácil de un falso negativo |
+| `--guardar RUTA` | dónde escribir los paquetes; por defecto `capturas/recibido.bin` |
+| `--identity RUTA` | usar otra identidad, para no tocar la guardada |
+| `--paquete RUTA` | reenviar bytes capturados tal cual, sin reconstruir |
 
 ### Reparto de tests
 
 | Fichero | Tests | Cubre |
 |---|---|---|
 | `test_transport.py` | 78 | Compresión, reensamblado, GATT, transporte |
-| `test_identity.py` | 59 | TLV de identidad, `peer_id`, firma, persistencia |
-| `test_current_payloads.py` | 44 | `MESSAGE`, TLV de fichero, voz |
+| `test_identity.py` | 64 | TLV de identidad, `peer_id`, firma, relleno |
+| `test_current_payloads.py` | 52 | `ANNOUNCE` TLV, `MESSAGE`, fichero, voz |
+| `test_conformance.py` | 48 | Conformidad con los tests de la app |
 | `test_noise_vectors.py` | 39 | Handshake XX, framing, anti-replay |
-| `test_payloads.py` | 25 | `ANNOUNCE`, fragmentación, opacidad |
+| `test_smoke_ble.py` | 28 | Announce, hexdump, elección de peer, RSSI |
+| `test_advertiser.py` | 27 | Anuncio: `Variant`, firmas, rutas D-Bus |
+| `test_payloads.py` | 25 | Fragmentación, opacidad |
+| `test_probe_advertise.py` | 22 | Informe de escaneo, tiempos, limitaciones |
 | `test_dialect.py` | 21 | Constantes Android con `file:line` |
 | `test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad |
 | `test_golden_packets.py` | 19 | Los 21 paquetes reales, byte a byte |
-| `test_advertiser.py` | 18 | Forma del anuncio y rutas D-Bus |
-| `test_smoke_ble.py` | 14 | Construcción del announce, hexdump |
-| `test_bleak_transport.py` | 8 | Transporte real (6 se saltan sin bleak) |
-| **Total** | **392** | 6 saltados = requieren hardware |
+| `test_bleak_transport.py` | 8 | Transporte real (se salta sin bleak) |
+| **Total** | **450** | 10 saltados = requieren hardware o `dbus_fast` |
 
 ### Ficheros del proyecto
 
-- `src/pybitchat/protocol/` — `types.py` (enums y constantes), `packet.py`
-  (cabecera v1/v2, compresión, `WirePayload`), `identity.py` (identidad y
-  anuncio TLV), `payloads.py` (despacho), `compression.py`, `reassembly.py`,
-  `message.py`, `tlv.py`, `voice.py`, `packet.py`
+- `src/pybitchat/protocol/` — `types.py` (enums, constantes, política de
+  relleno), `packet.py` (cabecera v1/v2, compresión, `WirePayload`, firma),
+  `identity.py` (identidad, TLV, `peer_id`, firma Ed25519), `payloads.py`
+  (despacho por dialecto), `compression.py`, `reassembly.py`, `message.py`,
+  `tlv.py`, `voice.py`
 - `src/pybitchat/noise/` — `session.py`, `framing.py`, `primitives.py`
 - `src/pybitchat/ble/` — `gatt.py` (UUIDs), `bleak_transport.py`,
   `advertiser.py`
 - `src/pybitchat/mesh/transport.py` — `Transport` abstracto y `MockTransport`
 - `EVALUACION-MIGRACION.md` — informe, 939 líneas, 14 secciones
+- `capturas/recibido.bin` — paquetes reales del móvil (**no** versionado)
 
 ---
 
-## 5. Por dónde seguir mañana
+## 5. Por donde seguir
 
-### Primero: arreglar el decodificador del `ANNOUNCE`
+### Primero: el handshake Noise (0x10)
 
-**El servidor GATT ya no es el siguiente paso.** La pregunta "¿hace falta?" está
-contestada por el §1: la app nos descubrió, conectó, y respondió a nuestro
-announce sobre la conexión que **nosotros** abrimos. El lado central basta.
+**Es lo unico que queda para cerrar el enlace.** El decodificador del announce
+ya esta arreglado (`63154e3`), asi que la pregunta de si hace falta el servidor
+GATT esta contestada por el §1: la app nos descubrio, conecto y respondio a
+nuestro announce sobre la conexion que **nosotros** abrimos. El lado central
+basta.
 
-El bug concreto es de una línea de criterio: `payloads.py:418` mapea
-`MessageType.ANNOUNCE` a `AnnouncePayload`, que implementa la forma **legacy**
-(sólo nickname). El announce actual es TLV.
+Y ahora hay algo que antes no habia: **la clave Noise de la app es publica y la
+tenemos**, esta en el TLV `0x02` de su announce:
 
-El formato ya está resuelto y probado, no hay que investigarlo:
+```
+973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b
+```
 
-- `identity.py` tiene el TLV de identidad con `peer_id` derivado, y el test usa
-  el announce real de 80 B.
-- Los 80 B de la captura de hoy dan `0x01` nickname, `0x02` Noise, `0x03` firma.
-  Encajan exactamente.
+Lo que ya esta hecho y verificado:
 
-Lo que hay que decidir al implementarlo: si `AnnouncePayload` se cambia al TLV
-para ambos dialectos, o si el TLV sólo aplica al actual. `decode_payload` ya
-exige `dialect=` para 6 valores ambiguos, así que el sitio natural es añadir
-una clase de payload TLV y mapear `(CURRENT, ANNOUNCE)` a ella, dejando
-`(LEGACY, ANNOUNCE)` como está. **No** reescribir la legacy: si la app legacy
-algún día habla con nosotros, sigue siendo la forma legacy.
+- La parte criptografica: Noise XX con `noiseprotocol`, 39 vectores de Cacophony
+  verificados.
+- La preimagen de firma: `to_binary_data_for_signing()` en `packet.py`.
+- La identidad y el `peer_id` derivado, con el announce real de 80 B.
 
-Los paquetes se guardan ahora en `capturas/recibido.bin`, así que el trabajo es
-sobre los bytes y no sobre el terminal.
-
-### Después: el servidor GATT (sólo si hace falta)
-
-No hay atajo si arrive a hacer falta: bleak 3.0.2 no puede ser peripheral en
-Linux, así que habría que implementarlo a mano, igual que el anuncio.
-
-**Orden de trabajo, con tests antes que hardware:**
-
-1. `ble/gatt_server.py` — `org.bluez.GattManager1` con un servicio y el
-   characteristic de BitChat, `org.bluez.GattService1` y
-   `org.bluez.GattCharacteristic1`.
-2. **Tests de formato primero**: rutas de objeto, firmas D-Bus, nombres de
-   interfaz. Es lo que más ha atrapado (§6, punto 12).
-3. Probar en hardware con un paso corto y aislado.
-
-Pregunta abierta antes de escribirlo: **¿hace falta?** Si la app nos descubre
-por el anuncio y nos escribe por la conexión que nosotros abrimos, el servidor
-GATT puede no hacer falta para el primer hito. Conviene comprobarlo.
-
-### Después: los tres problemas abiertos
-
-Orden sugerido:
-
-1. **Los 72 bytes de `0xff`** (§3.3). Es lo que más información da y es lo
-   único que la app manda y no entendemos. Candidatos: `Special recipient IDs`
-   en `BinaryProtocol.kt:32`, o relleno deliberado.
-2. **El `MESSAGE` de 4 bytes** que rechazamos. ¿Se sale la app de spec o
-   nuestro `MIN_PAYLOAD_SIZE` es demasiado estricto?
-3. **La contradicción del relleno** (§3.2). Requiere leer
-   `MessagePadding` y `BinaryProtocol.encode` a fondo.
-
-### Después: el handshake
-
-Con identidad válida y anuncio, el siguiente paso es `msg1` de Noise XX. La
-parte criptográfica ya está hecha y verificada con vectores; falta el
-transporte que la mueva y la preimagen de firma, que ya está implementada como
-`to_binary_data_for_signing()`.
+Lo que falta: **el transporte que mueva `msg1`** y lo envíe como
+`NOISE_HANDSHAKE`. Ningun `0x10` ha llegado de la app, asi que hay dos
+posibilidades que no se pueden distinguir sin probar: que nosotros no lo
+mandemos, o que la app no lo mande porque no nos ha emparejado todavia.
 
 **Detalle que ya se sabe:** el TTL se fija a 0 al firmar, porque baja en cada
 salto y si entrara en la preimagen cualquier paquete reenviado una sola vez
-llegaría con firma inválida.
+llegaria con firma invalida.
+
+**Orden de trabajo, con tests antes que hardware** (§6, punto 12):
+
+1. Escribir `msg1` de Noise XX con la clave de la identidad propia.
+2. Test con vector conocido: comprobar byte a byte contra Cacophony.
+3. Enviarlo como `NOISE_HANDSHAKE` en un `smoke_ble` y ver si la app contesta
+   con `NOISE_ENCRYPTED`.
+
+### Despues: los problemas abiertos
+
+1. **Los 64 bytes que `packet.py` llama firma** (§3.2bis). Es lo mas util: se
+   sabe donde esta y cuanto mide, pero no valida como Ed25519, cambia en cada
+   announce con el payload identico, y la app no activa `HAS_SIGNATURE`.
+2. **Los 72 bytes de `0xff`** (§3.3). Candidatos: `Special recipient IDs` en
+   `BinaryProtocol.kt:32`, o relleno deliberado.
+3. **El `MESSAGE` de 4 bytes** que rechazamos. ¿Se sale la app de spec o nuestro
+   `MIN_PAYLOAD_SIZE = 13` es demasiado estricto?
+4. **`REQUEST_SYNC` con `m = 384`** (§3.2ter). No se sabe que lo fija.
+
+### El servidor GATT: **no** es lo siguiente
+
+Se dejaria como paso siguiente porque es lo que falta por la lista de
+piezas, pero **hace falta para el primer hito ya se ha comprobado que no**: la
+app nos escribio por la conexion que nosotros abrimos.
+
+Si algun dia hace falta (por ejemplo, si la app deixa de poder escribirnos), no
+hay atajo: bleak 3.0.2 no puede ser peripheral en Linux, asi que habria que
+implementarlo a mano con `org.bluez.GattManager1`, `GattService1` y
+`GattCharacteristic1`, igual que el anuncio. Tests de formato primero: rutas de
+objeto, firmas D-Bus, nombres de interfaz.
 
 ---
 
@@ -437,7 +410,25 @@ llegaría con firma inválida.
     pares, nombre de bus usado como ruta de objeto, y firma de método deducida
     de una anotación que no la lleva. **La API hay que leerla antes de
     escribirla**, como se hizo con el Kotlin de la app, donde no ha habido ni un
-    fallo de ese tipo en 392 tests.
+    fallo de ese tipo en 450 tests.
+13. **Medir antes de concluir, y mirar el código antes de concluir otra vez.**
+    El relleno se afirmó bien, se negó mal y se volvió a afirmar bien en la misma
+    jornada (§3.2). Los dos errores fueron aritmética: contar desde los 102 B
+    sin la firma de 64, y **no mirar `packet.py`**, que ya tenía
+    `SIGNATURE_SIZE = 64` y leía la firma en el offset correcto. Ese fichero
+    estaba a un `grep` de distancia.
+14. **Un test que afirma lo que no se sabe es peor que no tener test.**
+    `test_el_byte_de_relleno_es_la_longitud_del_relleno` protegía el error: si
+    alguien "arreglaba" el código para que cuadrase un PKCS#7 falso, el test
+    pasaba. Los tests se revisan cuando cambia el understanding, no sólo cuando
+    cambia el código.
+15. **Guardar los bytes reales en cuanto llegan.** `smoke_ble.py` ahora escribe
+    `capturas/recibido.bin` siempre, incluso vacío. Recapturar desde el host
+    Linux cuesta un viaje; trabajar sobre los ficheros, no.
+16. **Los datos del entorno van en el mensaje de error.** El `UnicodeDecodeError`
+    en la posición 14 del announce no apuntaba a un problema de codificación:
+    la posición 14 era exactamente donde empezaba la clave binaria. Los bytes
+    dicen cuál es el fallo.
 
 ---
 
