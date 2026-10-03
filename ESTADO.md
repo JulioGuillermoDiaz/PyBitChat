@@ -175,56 +175,67 @@ relleno, pero **ningún `NOISE_HANDSHAKE` (0x10)**.
 (`ble/advertiser.py`). Si ahora sí lo anuncia y sigue sin handshake, el motivo
 será otro y habrá que Investigarlo.
 
-### 3.2 Relleno: NO es PKCS#7 — corrección de un error propio
+### 3.2 Relleno: es PKCS#7, confirmado - tras fallar dos veces
 
-**Retirada una afirmación que estaba en el código y en este documento:** que el
-relleno era "PKCS#7 exacto, la longitud del relleno es el valor del byte". Es
-**falso**, y se vio al medir los números de la captura del 3-oct:
+Las capturas, con la **firma** de 64 B dentro del contenido:
 
-| Paquete | Real | Relleno hasta 256 B | Byte de relleno |
+| Paquete | Real | Relleno | Byte |
 |---|---|---|---|
-| ANNOUNCE (3-oct) | 102 B | 154 B | `0x5a` = 90 |
-| REQUEST_SYNC (3-oct) | 38 B | 218 B | `0x9a` = 154 |
+| ANNOUNCE (02-oct) | 166 B | 90 B | `0x5a` = 90 |
+| filler (02-oct) | 96 B | 160 B | `0xa0` = 160 |
+| ANNOUNCE (03-oct) | 166 B | 90 B | `0x5a` = 90 |
+| ANNOUNCE (03-oct, 2o) | 166 B | 90 B | `0x5a` = 90 |
 
-154 ≠ 90 y 218 ≠ 154. En ambos casos la longitud **no** coincide con el byte.
+La longitud del relleno **es** el valor del byte, en las cuatro. `166 = 14 + 8 +
+80 + 64` y `256 - 166 = 90 = 0x5a`.
 
-**De dónde salió el error:** en `test_identity.py` el caso se escribía como
-`14 + 8 + 80 + 64 = 166`. Los **64** eran una firma de 64 bytes **supuesta**, no
-medida. Con ese 64 inventado, el relleno salía de 90 B y `0x5a` = 90 "cuadraba"
-perfectamente. Era aritmética circular: el dato que hacía cuadrar el PKCS#7 era
-el dato inventado.
+**Este dato se afirmo bien, se nego mal, y se volvio a afirmar bien.** Se
+consigna por que, porque el error dice mas que el resultado:
 
-Con los bytes reales de hoy, la estructura del announce es:
+1. La primera vez cuadraba **por casualidad**: el caso del test estaba escrito
+   `14 + 8 + 80 + 64`, con los 64 de la firma **supuestos**.
+2. Al medir con bytes reales se concluyo que no era PKCS#7, porque se conto
+   desde los 102 B sin la firma: `256 - 102 = 154`, contra un byte de 90. El
+   fallo fue **no mirar `packet.py`**, que ya define `SIGNATURE_SIZE = 64` y lee
+   la firma justo tras el payload. Ese fichero estaba a un `grep` de distancia.
 
-```
-102 B reales + 154 B hasta 256 = 256 B
-  14 cabecera + 8 sender + 80 payload TLV   (todo declarado)
-  + 64 bytes que la cabecera NO declara
-  + relleno hasta 256
-```
+`pkcs7_pad_to_bucket` **si** reproduce el relleno real de la app.
 
-Esos **64 bytes son la firma**, y aquí se pisó el protocolo que ya teníamos
-escrito. `packet.py` ya definía `SIGNATURE_SIZE = 64` y `HAS_SIGNATURE`, y el
-parser la lee en el offset correcto justo tras el payload. Se.verificó:
+### 3.2bis Los 64 bytes: son la firma, pero no valida
 
 ```
-102 B tal cual (flags=0)      -> truncado leyendo signature: 64 B en offset 102
-102 + 64, flags=0             -> OK, payload 80, firma si (64 B)
-102 + 64 + 90, flags=0        -> OK, payload 80, firma si (64 B)
+102 B tal cual        -> truncado leyendo signature: 64 B en offset 102
+102 + 64              -> OK, payload 80, firma si (64 B)
 ```
 
-No era un campo sin explicar: era la firma, y el sitio estaba bien. Lo que no
-cuadra es la cabecera: la app **no** activa `HAS_SIGNATURE` (el byte de flags
-del announce real es `0x00`), pero incluye los 64 bytes igualmente. Con
-`flags = 0` el parser no los consume.
+La posicion y el tamano son correctos. Lo que **no** se ha resuelto:
 
-**Y no valida como firma Ed25519** sobre cinco mensajes candidatos (payload
-TLV, cabecera+sender+payload, sender+payload, TLV sin la clave de firma, sólo
-el nickname), con la clave `0x03` del propio announce. Así que se sabe **dónde**
-está y **cuánto** mide, pero no **de qué** firma: puede ser otra cosa de 64 B.
+- **No valida** como firma Ed25519 con la clave `0x03` del propio announce,
+  sobre seis mensajes candidatos (payload TLV, cabecera+sender+payload,
+  sender+payload, TLV sin la clave de firma, solo el nickname, TLV completo).
+- **Cambia en cada announce**: con el payload byte a byte identico, las tres
+  firmas difieren en 64 de 64 bytes. Una firma determinista daria lo mismo, asi
+  que o cubre algo que cambia (el timestamp de la cabecera) o no es una firma.
+- El byte de `flags` del announce real es `0x00`: la app **no** activa
+  `HAS_SIGNATURE` pero manda los 64 bytes. Con `flags=0` el parser no los
+  consume, y por eso hubo que concatenarlos a mano.
 
-Conclusión: se rellena hasta **256 B** y hay una firma de 64 B que la cabecera
-no declara. `should_pad_for_ble()` sigue sin tocarse (§6).
+En cambio el **relleno si es identico** en las tres capturas (90 bytes de
+`0x5a`), que es justo lo que hace PKCS#7. Lo que no se entiende es la firma.
+
+### 3.2ter `REQUEST_SYNC`: `m` cambio de 256 a 384
+
+Dato del 03-oct, sin explicar:
+
+| | payload | `p` | `m` | `data` |
+|---|---|---|---|---|
+| primera sesion | 16 B | 7 | **256** | 1 B |
+| segunda sesion | 18 B | 7 | **384** | 3 B |
+
+`p` se mantiene; `m` sube de 256 a 384 y `data` de 1 a 3 bytes (los +2 del
+payload). 384 = 256 x 3/2, y no es multiplo de 256, asi que no parece un tamano
+de paquete sino un **limite de bytes a pedir**. No se ha comprobado que lo fija:
+puede depender de la MTU negociada o de lo que la app tiene que mandar.
 
 ### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
 

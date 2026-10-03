@@ -210,52 +210,50 @@ def should_pad_for_ble(msg_type: int) -> bool:
     Los paquetes capturados de la app Android (2026-10-02 y 2026-10-03) **sí**
     vienen rellenados, y no son tramas Noise:
 
-    | Paquete     | Tipo          | Real  | Relleno | Byte         |
-    |-------------|---------------|-------|---------|--------------|
-    | 02 oct      | ANNOUNCE      | 166 B | 90 B    | `0x5a` = 90  |
-    | 02 oct      | filler        | 96 B  | 160 B   | `0xa0` = 160 |
-    | 03 oct      | ANNOUNCE      | 102 B | 154 B   | `0x5a` = 90  |
-    | 03 oct      | REQUEST_SYNC  | 38 B  | 218 B   | `0x9a` = 154 |
+    | Paquete        | Tipo         | Real | Relleno | Byte         |
+    |----------------|--------------|------|---------|--------------|
+    | 02 oct         | ANNOUNCE     | 166 B| 90 B    | `0x5a` = 90  |
+    | 02 oct         | filler       | 96 B | 160 B   | `0xa0` = 160 |
+    | 03 oct         | ANNOUNCE     | 166 B| 90 B    | `0x5a` = 90  |
+    | 03 oct         | REQUEST_SYNC | 102 B| 154 B   | `0x9a` = 154 |
 
-    **Corrección importante.** Antes aquí se afirmaba que el relleno era
-    "PKCS#7 exacto: la longitud del relleno es el valor del byte". **Es
-    falso**, y sólo se vio al medir los números de las capturas:
+    **El relleno SÍ es PKCS#7 exacto**: la longitud del relleno es el valor del
+    byte, y el total cae en 256 B. Las cuatro filas cuadran.
 
-    - ANNOUNCE del 03 oct: 256 − 102 = **154** B de relleno, byte `0x5a` = 90.
-    - REQUEST_SYNC del 03 oct: 256 − 38 = **218** B de relleno, byte
-      `0x9a` = 154.
+    ### Por qué esto se afirmó mal dos veces
 
-    En ambos casos la longitud **no** coincide con el byte. La conclusión
-    "PKCS#7 exacto" se dedujo de mirar `0x5a` y pensar "90 = 0x5a" sin contar
-    cuántos bytes de relleno había. El 0x5a aparece en la segunda captura
-    porque el contenido es el mismo, no porque sea longitud.
+    1. La primera vez se afirmó bien **por el motivo equivocado**: el caso del
+       test estaba escrito como `14 + 8 + 80 + 64 = 166`, y los 64 eran una
+       firma **supuesta**. La cuenta daba, pero por casualidad.
+    2. Al medir con bytes reales se concluded que no era PKCS#7, porque se
+       contó el relleno desde los 102 B (sin la firma) y salió 154 contra un
+       byte de 90. El error fue **no mirar `packet.py`**, que ya define
+       `SIGNATURE_SIZE = 64` y lee la firma justo tras el payload.
 
-    Lo que sí se puede afirmar, con las cuatro capturas:
+    Con la firma dentro, la cuenta correcta es:
 
-    - El destino es **256 B** en todos los casos.
-    - El relleno **no** es PKCS#7 ni repite un byte constante.
-    - El relleno parece **aleatorio**: en el ANNOUNCE del 03 oct hay 25 bytes
-      distintos tras los 90 `0x5a` finales, que no son ni `0x5a` ni un valor
-      constante.
+        14 cabecera + 8 sender + 80 payload + 64 firma = 166 B
+        256 − 166 = 90 B de relleno, byte 0x5a = 90  ✓
 
-    Por esas rutas, para un ANNOUNCE la política da `false` y no debería haber
-    relleno. Las salidas posibles siguen siendo las mismas, **ninguna
-    comprobada**:
+    Consecuencia práctica: **nuestro announce lleva la firma antes del
+    relleno**, y es lo que hay que hacer. `pkcs7_pad_to_bucket` sí reproduce el
+    relleno real de la app.
 
-    1. Esos paquetes salieron por una ruta distinta de las tres del broadcaster.
-    2. `toBinaryData` rellena igual, o hay otro relleno aguas arriba.
-    3. La política no es lo que dice su nombre y hay que releerla.
+    ### Lo que sigue sin explicarse
+
+    Los 64 bytes que `packet.py` llama firma **no validan** como firma Ed25519
+    con la clave `0x03` del propio announce, sobre seis mensajes candidatos. Y
+    cambian en cada announce (64 de 64 bytes distintos) con el payload
+    idéntico, lo que una firma determinista no haría. El relleno, en cambio, es
+    idéntico en las tres capturas.
+
+    Es decir: se sabe **dónde** están y **cuánto** miden, pero no **de qué** son.
+    La contradicción con la política —que dice que sólo se rellena Noise—
+    sigue abierta: un ANNOUNCE viene relleno y la política da `false`.
 
     **No se cambia el comportamiento con una observación que no se explica.**
     La función sigue reflejando el código, que es lo verificable, y el conflicto
-    queda escrito aquí. Cuando se sepa de dónde salieron esos paquetes se
-    corrige, con la explicación al lado.
-
-    `pkcs7_pad_to_bucket` sigue siendo lo que usa el emisor. **No reproduce el
-    relleno real de la app** —no es PKCS#7—, así que el announce que mandamos
-    lleva un relleno distinto del que ella manda. No ha dado ningún fallo
-    porque la app acepta el paquete: el relleno es transporte, no carga útil,
-    y se descarta al descomprimir.
+    queda escrito aquí.
 
     Nota: `bitchat-tui` rellenaba **todo** a cubos (`packet_creation.rs`) y sus
     vectores de 2025 muestran un announce de 256 B con 39 reales.
