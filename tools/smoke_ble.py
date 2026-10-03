@@ -86,6 +86,11 @@ def construir_announce(nickname: str, ttl: int = 3) -> bytes:
     return Packet(header=cabecera, sender_id=SENDER_ID, payload=carga).to_bytes()
 
 
+#: RSSI que bleak pone cuando BlueZ **no** mide ninguno. Mínimo de un entero
+#: con signo de 8 bits, y el valor "sin dato" del protocolo.
+RSSI_SIN_DATO = -127
+
+
 def contar_uuids(anuncios: dict) -> int:
     """Suma los UUID de servicio de todos los dispositivos vistos.
 
@@ -97,22 +102,69 @@ def contar_uuids(anuncios: dict) -> int:
     return sum(len(adv.service_uuids or ()) for _dev, adv in anuncios.values())
 
 
+def es_rssi_real(rssi) -> bool:
+    """¿Este RSSI es una medida, o el valor por defecto de bleak?
+
+    `scanner.py:209` del backend BlueZ de bleak hace
+
+        rssi=props.get("RSSI", -127)
+
+    así que **`-127` significa "BlueZ no dio RSSI"**, no "señal mínima". Es el
+    mínimo representable de un entero con signo de 8 bits, el valor que el
+    protocolo usa para "sin dato".
+
+    Importa porque un `-127` no dice nada de la distancia: no es un candidato
+    débil, es un candidato **no medido**. Elegirlo y luego fallar al conectar
+    hace pensar que el enlace se rompió, cuando lo que quizá pasó es que se
+    eligió un dispositivo que nunca se oyó de verdad.
+    """
+    return rssi is not None and rssi > RSSI_SIN_DATO
+
+
 async def resolver_telefono(timeout: float):
     """Busca el teléfono por UUID de servicio, sin cachear direcciones."""
     from bleak import BleakScanner
 
     print("buscando el teléfono…")
     encontrados = await BleakScanner.discover(timeout=timeout, return_adv=True)
-    print(f"  {len(encontrados)} dispositivos, {contar_uuids(encontrados)} UUID de servicio")
-    for mac, (dev, adv) in encontrados.items():
-        if any(es_nuestro_servicio(u) for u in (adv.service_uuids or [])):
-            print(f"  encontrado: {mac}  rssi={adv.rssi}")
-            return mac, dev, adv
-    if not encontrados:
-        print("  el adaptador no vio NADA: no es el teléfono")
-    else:
-        print("  hay dispositivos pero ninguno anuncia BitChat")
-    return None
+    print(f"  {len(encontrados)} dispositivos, "
+          f"{contar_uuids(encontrados)} UUID de servicio")
+
+    candidatos = [
+        (mac, dev, adv)
+        for mac, (dev, adv) in encontrados.items()
+        if any(es_nuestro_servicio(u) for u in (adv.service_uuids or []))
+    ]
+
+    if not candidatos:
+        if not encontrados:
+            print("  el adaptador no vio NADA: no es el teléfono")
+        else:
+            print("  hay dispositivos pero ninguno anuncia BitChat")
+        return None
+
+    # Todos los que dicen anunciar BitChat, no sólo el primero. Con varios
+    # candidatos, cuál elegir deja de ser obvio, y quedarse con el primero en
+    # orden de aparición es arbitrario: el orden de un dict de bleak no
+    # significa nada.
+    print(f"  {len(candidatos)} candidato(s) con el UUID de BitChat:")
+    for mac, _dev, adv in candidatos:
+        marca = "" if es_rssi_real(adv.rssi) else "   <- RSSI no medido"
+        print(f"    {mac}  rssi={adv.rssi}{marca}")
+
+    medidos = [c for c in candidatos if es_rssi_real(c[2].rssi)]
+    if medidos:
+        mac, dev, adv = max(medidos, key=lambda c: c[2].rssi)
+        print(f"  elegido: {mac}  rssi={adv.rssi} (el más fuerte de los medidos)")
+        return mac, dev, adv
+
+    # Ninguno tiene medida. Se usa el primero, pero avisando: si la conexión
+    # falla, el culpable más probable es que se eligió a ciegas.
+    mac, dev, adv = candidatos[0]
+    print(f"  AVISO: ninguno tiene RSSI medido. Se usa {mac} a ciegas.")
+    print("  Si falla la conexión, el problema puede ser que no se oyó de")
+    print("  verdad: sube --scan y comprueba si la app anuncia en primer plano.")
+    return mac, dev, adv
 
 
 async def principal(args: argparse.Namespace) -> int:
@@ -133,7 +185,7 @@ async def principal(args: argparse.Namespace) -> int:
         print("¿Está desbloqueado con BitChat en primer plano?")
         print("Android deja de anunciar cuando la app pasa a segundo plano.")
         return 1
-    mac, dev, _ = hallado
+    mac, dev, adv = hallado
 
     recibidos: list[bytes] = []
 
@@ -160,13 +212,34 @@ async def principal(args: argparse.Namespace) -> int:
             return await _sesion(cliente, args, identidad, recibidos, al_recibir)
     except TimeoutError:
         print("\nTIMEOUT al conectar.")
-        print("El escaneo funciona, así que el radio ve al teléfono; lo que falla")
-        print("es el establecimiento del enlace. Causas habituales:")
-        print("  - Quedó una conexión GATT colgada de una ejecución anterior.")
-        print("    Se limpia con:  bluetoothctl devices Connected")
-        print("                    bluetoothctl remove <MAC>")
-        print("  - Android ya está conectado a otro cliente de este adaptador.")
-        print("  - Reintentar: a veces basta con volver a lanzarlo.")
+        print()
+        # Se distingue lo que está **verificado** de lo que se supone. Antes
+        # la lista de causas iba detrás de "el radio ve al teléfono", que es
+        # una afirmación que no siempre es cierta: se puede ver el anuncio y
+        # que la MAC no corresponda a un dispositivo que acepte conexiones.
+        if not es_rssi_real(adv.rssi):
+            print("  Lo que sabemos:")
+            print(f"    - el anuncio con el UUID de BitChat es visible "
+                  f"(rssi={adv.rssi})")
+            print("    - ese RSSI es el valor por defecto de bleak, NO una medida")
+            print("      (scanner.py:209 usa props.get('RSSI', -127))")
+            print()
+            print("  Hipótesis, por orden de probabilidad:")
+            print("    - La dirección del anuncio no es la del dispositivo que")
+            print("      acepta conexiones. Android rotó la MAC al apagar y")
+            print("      encender el BT. Se comprueba con:  bluetoothctl info <MAC>")
+            print("    - La app anuncia pero no acepta conexiones entrantes hasta")
+            print("      que el móvil esté desbloqueado.")
+        else:
+            print("  Lo que sabemos:")
+            print(f"    - anuncio con RSSI medido ({adv.rssi} dBm), señal real")
+            print()
+            print("  Causas habituales:")
+            print("    - Conexión GATT colgada de una ejecución anterior:")
+            print("        bluetoothctl devices Connected")
+            print("        bluetoothctl remove <MAC>")
+            print("    - Android ya conectado a otro cliente de este adaptador.")
+            print("    - Reintentar: el primer intento es el que negocia.")
         raise SystemExit(2)
 
 
