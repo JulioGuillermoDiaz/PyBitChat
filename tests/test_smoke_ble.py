@@ -161,6 +161,73 @@ class TestEleccionDelTelefono(unittest.TestCase):
         self.assertIsNone(self._resolver([]))
 
 
+class TestGuardarCapturas(unittest.TestCase):
+    """Los bytes recibidos se guardan siempre, incluso sin decodificar.
+
+    El siguiente paso es arreglar el decodificador del ANNOUNCE, y para eso hace
+    falta el paquete real. Perderlo porque el script imprimió en pantalla obliga
+    a volver al host Linux a recapturar.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.smoke = _cargar_smoke()
+
+    def test_guarda_los_paquetes_recibidos(self):
+        import tempfile
+        from pathlib import Path as _P
+
+        recibidos = [b"\x01\x02\x03", b"\x04\x05"]
+        with tempfile.TemporaryDirectory() as d:
+            destino = _P(d) / "sub" / "recibido.bin"
+            escritos = self.smoke._guardar(recibidos, destino)
+            self.assertTrue(destino.exists(), "no se creó el fichero")
+            self.assertEqual(destino.read_bytes(), b"\x01\x02\x03\x04\x05")
+            self.assertEqual(escritos, 2)
+
+    def test_guarda_aunque_no_haya_paquetes(self):
+        """Sin datos también se crea el fichero: su ausencia significaría
+        "no se guardó", no "no llegó nada", y esas son preguntas distintas."""
+        import tempfile
+        from pathlib import Path as _P
+
+        with tempfile.TemporaryDirectory() as d:
+            destino = _P(d) / "recibido.bin"
+            self.smoke._guardar([], destino)
+            self.assertTrue(destino.exists())
+            self.assertEqual(destino.read_bytes(), b"")
+
+    def test_crea_el_directorio(self):
+        """`capturas/` no está en el repo. Si no se crea, el primer guardado
+        falla y se pierde la captura."""
+        import tempfile
+        from pathlib import Path as _P
+
+        with tempfile.TemporaryDirectory() as d:
+            destino = _P(d) / "a" / "b" / "c" / "x.bin"
+            self.smoke._guardar([b"\x00"], destino)
+            self.assertTrue(destino.exists())
+
+    def test_el_fichero_no_se_versiona(self):
+        """Las capturas son de un dispositivo concreto: no van al repo."""
+        import re
+        from pathlib import Path as _P
+
+        raiz = _P(__file__).resolve().parent.parent
+        ignore = (raiz / ".gitignore").read_text(encoding="utf-8")
+        patrones = [
+            ln.strip()
+            for ln in ignore.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        # Se comprueba el patrón más específico, que es el que manda.
+        self.assertIn("capturas/", patrones)
+        self.assertIsNotNone(
+            re.search(r"^capturas/", ignore, re.M),
+            ".gitignore no excluye capturas/",
+        )
+
+
 class TestConstruirAnnounce(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -26,8 +26,78 @@ código.
 | **MTU 517** | ✅ coincide con Android 14+ |
 | **Recepción de paquetes reales** | ✅ 4 paquetes decodificados |
 | **Envío de identidad válida** | ✅ la app responde, sin handshake todavía |
-| **Anuncio como peripheral** | 🔧 en prueba — commit `0c8c613` |
+| **Anuncio como peripheral** | ✅ **funciona** — BlueZ lo acepta, `ce990ff` |
 | Handshake Noise con la app real | ❌ **falta** |
+
+### El hito del 2026-10-03
+
+Primera sesión en que **la app responde a nuestro announce con el suyo**. Antes
+se enviaba identidad y no venía nada; hoy el intercambio es completo:
+
+```
+enviando ANNOUNCE de 'pybitchat-probe'   111 B   -> enviado
+--- paquete recibido: 256 B (nº 1) ---    tipo=0x01(ANNOUNCE)  payload=80 B
+--- paquete recibido: 256 B (nº 2) ---    tipo=0x01(ANNOUNCE)  payload=80 B
+--- paquete recibido: 256 B (nº 3) ---    tipo=0x21(REQUEST_SYNC)  carga OK
+total de paquetes recibidos: 3
+```
+
+**El `ANNOUNCE` que nos llega es TLV, y ahí hay un bug nuestro.** Los 80 B son
+`[tipo u8][longitud u8][valor]`:
+
+```
+01 0a 61 6e 65 77 65 6c 6c 73 37 34   -> 0x01 nickname, "anewells74"
+02 20 97 35 85 b6 50 28 36 ff ...     -> 0x02 clave Noise, 32 B
+03 20 7a da 9d ab 1b ec 9e b2 ...     -> 0x03 clave de firma, 32 B
+```
+
+`AnnouncePayload` (`payloads.py:69`) trata el payload **sólo como nickname en
+UTF-8**, que es la forma legacy. De ahí el `UnicodeDecodeError` en la posición
+14: justo donde empieza la clave binaria. Está documentado como "decodificado
+y validado", pero se validó con vectores de 8-9 bytes, demasiado cortos para
+contener una clave. El formato TLV **ya existe y está probado** en
+`identity.py`, con el announce real de 80 B.
+
+**El announce que enviamos nosotros sí es correcto** —la app respondió— así que
+lo único pendiente aquí es saber leer el suyo.
+
+### Lo que seMidió contra el teléfono
+| Handshake Noise con la app real | ❌ **falta** |
+
+| **Anuncio como peripheral** | ✅ **funciona** — BlueZ lo acepta, `ce990ff` |
+| Handshake Noise con la app real | ❌ **falta** |
+
+### El hito del 2026-10-03
+
+Primera sesión en que **la app responde a nuestro announce con el suyo**. Antes
+se enviaba identidad y no venía nada; hoy el intercambio es completo:
+
+```
+enviando ANNOUNCE de 'pybitchat-probe'   111 B   -> enviado
+--- paquete recibido: 256 B (nº 1) ---    tipo=0x01(ANNOUNCE)  payload=80 B
+--- paquete recibido: 256 B (nº 2) ---    tipo=0x01(ANNOUNCE)  payload=80 B
+--- paquete recibido: 256 B (nº 3) ---    tipo=0x21(REQUEST_SYNC)  carga OK
+total de paquetes recibidos: 3
+```
+
+**El `ANNOUNCE` que nos llega es TLV, y ahí hay un bug nuestro.** Los 80 B son
+`[tipo u8][longitud u8][valor]`:
+
+```
+01 0a 61 6e 65 77 65 6c 6c 73 37 34   -> 0x01 nickname, "anewells74"
+02 20 97 35 85 b6 50 28 36 ff ...     -> 0x02 clave Noise, 32 B
+03 20 7a da 9d ab 1b ec 9e b2 ...     -> 0x03 clave de firma, 32 B
+```
+
+`AnnouncePayload` (`payloads.py:69`) trata el payload **sólo como nickname en
+UTF-8**, que es la forma legacy. De ahí el `UnicodeDecodeError` en la posición
+14: justo donde empieza la clave binaria. Está documentado como "decodificado
+y validado", pero se validó con vectores de 8-9 bytes, demasiado cortos para
+contener una clave. El formato TLV **ya existe y está probado** en
+`identity.py`, con el announce real de 80 B.
+
+**El announce que enviamos nosotros sí es correcto** —la app respondió— así que
+lo único pendiente aquí es saber leer el suyo.
 
 ### Lo que seMidió contra el teléfono
 
@@ -105,23 +175,28 @@ relleno, pero **ningún `NOISE_HANDSHAKE` (0x10)**.
 (`ble/advertiser.py`). Si ahora sí lo anuncia y sigue sin handshake, el motivo
 será otro y habrá que Investigarlo.
 
-### 3.2 Contradicción del relleno, sin resolver
+### 3.2 Relleno: **resuelto** con datos, contra el código de la app
 
 `BLEPacketPaddingPolicy.shouldPadForBLE` dice que **sólo** se rellenan las
 tramas Noise, y se usa de verdad (`BluetoothPacketBroadcaster.kt:215, 237, 350`).
 
-Pero los paquetes capturados son un `ANNOUNCE` y un `MESSAGE`, ninguno Noise, y
-**sí vienen rellenos** con PKCS#7 exacto:
+Los paquetes capturados desmienten eso: ninguno es Noise y **todos vienen
+rellenos**. Con la captura de hoy, dos casos más:
 
 | Paquete | Contenido | Relleno | Byte |
 |---|---|---|---|
 | ANNOUNCE | 166 B | 90 B | `0x5a` = 90 |
 | filler | 96 B | 160 B | `0xa0` = 160 |
+| ANNOUNCE (hoy) | 166 B | 90 B | `0x5a` = 90 |
+| REQUEST_SYNC (hoy) | 102 B | 154 B | `0x9a` = 154 |
 
-**No se cambió el comportamiento.** La función sigue reflejando el código, que
-es lo verificable, y el conflicto está documentado en el docstring. Cambiarla
-con una observación que no se explica sería sustituir una afirmación sin
-verificar por otra igual de sin verificar.
+El relleno es **PKCS#7 exacto**: el byte de relleno **es** la longitud del
+relleno, en los cuatro casos. Y el destino son **256 B** en todos ellos.
+
+Conclusión provisional: se rellena hasta 256 B, por longitud, **sea Noise o
+no**. La función `should_pad_for_ble()` sigue sin tocarse —ver §6— pero ahora
+la contradicción está caracterizada, no sólo observada: sabemos **qué** hace
+el relleno, aunque el código diga que no debería hacerlo.
 
 ### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
 
@@ -162,6 +237,23 @@ python3 -m venv .venv
 Móvil **desbloqueado con BitChat en primer plano**: Android deja de anunciar
 cuando la app pasa a segundo plano.
 
+> **Tras 15 min sin actividad, hay que cerrar BitChat y volver a abrirlo.**
+>
+> Anotado por el usuario el 2026-10-03. Es el dato que más tiempo costó hoy.
+> Sin esto se diagnostica como si fuera un fallo del anuncio o del escaneo.
+>
+> **Lo que se veía:** la app sencillamente **no aparecía** en el escaneo.
+> `smoke_ble.py` informaba `hay dispositivos pero ninguno anuncia BitChat`, y
+> los 11 dispositivos que sí aparecían eran otros. El recuento de UUIDs de
+> servicio caía de 29 a 9, que es la pista: se había perdido una entrada.
+>
+> **El error de razonamiento que induce:** "la app no anuncia" se lee como un
+> hecho sobre el estado del móvil, cuando en realidad es un estado *por
+> preparar*. Nada en el código lo distingue de "el móvil está apagado".
+>
+> **Antes de sacar conclusiones del escaneo, comprobar esto primero.** Es más
+> barato que cualquier análisis del announcement, y no se deduce de los datos.
+
 | Fichero | Qué prueba |
 |---|---|
 | `tools/smoke_ble.py` | Conecta, envía announce, registra lo que llega |
@@ -201,12 +293,37 @@ cuando la app pasa a segundo plano.
 
 ## 5. Por dónde seguir mañana
 
-### Primero: el resultado del announce
+### Primero: arreglar el decodificador del `ANNOUNCE`
 
-Si `probe_advertise.py` anuncia bien, el siguiente paso natural es el
-**servidor GATT** (`org.bluez.GattManager1`). No hay atajo: bleak 3.0.2 no
-puede ser peripheral en Linux, así que hay que implementarlo a mano, igual que
-el anuncio.
+**El servidor GATT ya no es el siguiente paso.** La pregunta "¿hace falta?" está
+contestada por el §1: la app nos descubrió, conectó, y respondió a nuestro
+announce sobre la conexión que **nosotros** abrimos. El lado central basta.
+
+El bug concreto es de una línea de criterio: `payloads.py:418` mapea
+`MessageType.ANNOUNCE` a `AnnouncePayload`, que implementa la forma **legacy**
+(sólo nickname). El announce actual es TLV.
+
+El formato ya está resuelto y probado, no hay que investigarlo:
+
+- `identity.py` tiene el TLV de identidad con `peer_id` derivado, y el test usa
+  el announce real de 80 B.
+- Los 80 B de la captura de hoy dan `0x01` nickname, `0x02` Noise, `0x03` firma.
+  Encajan exactamente.
+
+Lo que hay que decidir al implementarlo: si `AnnouncePayload` se cambia al TLV
+para ambos dialectos, o si el TLV sólo aplica al actual. `decode_payload` ya
+exige `dialect=` para 6 valores ambiguos, así que el sitio natural es añadir
+una clase de payload TLV y mapear `(CURRENT, ANNOUNCE)` a ella, dejando
+`(LEGACY, ANNOUNCE)` como está. **No** reescribir la legacy: si la app legacy
+algún día habla con nosotros, sigue siendo la forma legacy.
+
+Los paquetes se guardan ahora en `capturas/recibido.bin`, así que el trabajo es
+sobre los bytes y no sobre el terminal.
+
+### Después: el servidor GATT (sólo si hace falta)
+
+No hay atajo si arrive a hacer falta: bleak 3.0.2 no puede ser peripheral en
+Linux, así que habría que implementarlo a mano, igual que el anuncio.
 
 **Orden de trabajo, con tests antes que hardware:**
 

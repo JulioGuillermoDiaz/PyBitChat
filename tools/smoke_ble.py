@@ -141,6 +141,19 @@ async def resolver_telefono(timeout: float):
             print("  el adaptador no vio NADA: no es el teléfono")
         else:
             print("  hay dispositivos pero ninguno anuncia BitChat")
+            # Esta es la causa más frecuente y **no** se deduce de los datos.
+            # Antes de culpar al código o al adaptador, hay que descartar el
+            # estado de la app: tras un rato sin actividad deja de anunciarse
+            # hasta que se cierre y se vuelva a abrir.
+            print()
+            print("  Antes que nada, comprueba esto en el móvil:")
+            print("    - BitChat en primer plano y el móvil desbloqueado")
+            print("    - **Tras 15 min sin actividad hay que cerrar BitChat")
+            print("      y volver a abrirlo**, o no anunciará")
+            print()
+            print("  Es la causa más frecuente y no se deduce del escaneo:")
+            print("  una app que no anuncia es indistinguible de una app")
+            print("  que se ha quedado dormida.")
         return None
 
     # Todos los que dicen anunciar BitChat, no sólo el primero. Con varios
@@ -275,7 +288,29 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir) -> int:
     print(f"\nescuchando {args.segundos} s…")
     await asyncio.sleep(args.segundos)
 
+    # Se guarda lo recibido **siempre**, aunque el script termine bien. Los
+    # bytes son la evidencia: el próximo paso es arreglar el decodificador del
+    # ANNOUNCE, y para eso hace falta el paquete real, no una transcripción en
+    # el terminal que hay que volver a capturar desde el host Linux.
+    destino = args.guardar
+    _guardar(recibidos, destino)
+    print(f"  {len(recibidos)} paquete(s) guardados en {destino} "
+          f"({destino.stat().st_size} B)")
+
     return _informe(recibidos)
+
+
+def _guardar(recibidos: list[bytes], destino: Path) -> int:
+    """Concatena los paquetes recibidos en `destino`. Devuelve el nº escrito.
+
+    Se guarda también cuando la lista está vacía, y crea el directorio si hace
+    falta. Sin datos, su ausencia significaría "no se guardó" y no "no llegó
+    nada": son preguntas distintas, y no se pueden distinguir si el fichero
+    sólo aparece cuando hay algo que escribir.
+    """
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    destino.write_bytes(b"".join(recibidos))
+    return len(recibidos)
 
 
 def _informe(recibidos: list[bytes]) -> int:
@@ -289,6 +324,9 @@ def _informe(recibidos: list[bytes]) -> int:
         print("     de BitChat es otro del que suponemos.")
         print("\nPara distinguirlas: si el móvil muestra el peer en su lista de")
         print("pares, nos descubrió y es el caso 2. Si no aparece, es el caso 1.")
+        print("\nAntes de ninguna de las dos: si el móvil lleva más de 15 min")
+        print("sin actividad, la app deja de anunciarse hasta que se cierre y")
+        print("se vuelva a abrir. Es la causa más frecuente.")
     return 0
 
 
@@ -308,6 +346,9 @@ def main() -> int:
                    help="segundos de escaneo (por defecto: 15)")
     p.add_argument("--timeout", type=float, default=25.0,
                    help="segundos de conexión (por defecto: 25)")
+    p.add_argument("--guardar", type=Path,
+                   default=RAIZ / "capturas" / "recibido.bin",
+                   help="fichero donde se guardan los paquetes recibidos")
     args = p.parse_args()
     if args.paquete:
         args.paquete = args.paquete.read_bytes()

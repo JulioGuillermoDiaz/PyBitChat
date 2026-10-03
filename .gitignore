@@ -9,6 +9,10 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
+# Paquetes reales capturados del movil. Son de un dispositivo concreto
+# (MAC, claves, nickname) y no son codigo: se regeneran con smoke_ble.py.
+capturas/
+
 # Clon de un proyecto de terceros, de sólo lectura. No se versiona: es el
 # código fuente de otra persona y volver a publicarlo aquí no aporta nada.
 # Se recrea con:
