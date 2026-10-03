@@ -203,16 +203,28 @@ Con los bytes reales de hoy, la estructura del announce es:
   + relleno hasta 256
 ```
 
-Esos **64 bytes no son relleno**. Son 64 bytes entre el payload y el final,
-distintos de `0x5a`, y 64 es exactamente el tamaño de una firma Ed25519 — y la
-app manda `0x03` = clave de firma. **Probado y NO valida** como firma sobre
-ninguno de los cinco mensajes candidatos (cabecera+sender, +payload, payload
-solo, TLV sin la clave, sender solo). Descarta el mensaje, no la idea: falta
-saber **de qué** firma.
+Esos **64 bytes son la firma**, y aquí se pisó el protocolo que ya teníamos
+escrito. `packet.py` ya definía `SIGNATURE_SIZE = 64` y `HAS_SIGNATURE`, y el
+parser la lee en el offset correcto justo tras el payload. Se.verificó:
 
-Conclusión provisional: se rellena hasta **256 B**, y hay un campo de 64 B que
-`payload_len` no describe. `should_pad_for_ble()` sigue sin tocarse (§6) y el
-conflicto con la app sigue abierto, pero ahora está bien caracterizado.
+```
+102 B tal cual (flags=0)      -> truncado leyendo signature: 64 B en offset 102
+102 + 64, flags=0             -> OK, payload 80, firma si (64 B)
+102 + 64 + 90, flags=0        -> OK, payload 80, firma si (64 B)
+```
+
+No era un campo sin explicar: era la firma, y el sitio estaba bien. Lo que no
+cuadra es la cabecera: la app **no** activa `HAS_SIGNATURE` (el byte de flags
+del announce real es `0x00`), pero incluye los 64 bytes igualmente. Con
+`flags = 0` el parser no los consume.
+
+**Y no valida como firma Ed25519** sobre cinco mensajes candidatos (payload
+TLV, cabecera+sender+payload, sender+payload, TLV sin la clave de firma, sólo
+el nickname), con la clave `0x03` del propio announce. Así que se sabe **dónde**
+está y **cuánto** mide, pero no **de qué** firma: puede ser otra cosa de 64 B.
+
+Conclusión: se rellena hasta **256 B** y hay una firma de 64 B que la cabecera
+no declara. `should_pad_for_ble()` sigue sin tocarse (§6).
 
 ### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
 

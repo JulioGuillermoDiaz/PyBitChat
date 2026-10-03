@@ -20,9 +20,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pybitchat.ble.gatt import SERVICE_UUID  # noqa: E402
 from pybitchat.protocol.packet import Packet  # noqa: E402
+from pybitchat.protocol.identity import IdentityAnnouncement  # noqa: E402
 from pybitchat.protocol.payloads import (  # noqa: E402
     AnnouncePayload,
     CURRENT,
+    LEGACY,
     decode_payload,
 )
 from pybitchat.protocol.types import (  # noqa: E402
@@ -247,13 +249,44 @@ class TestConstruirAnnounce(unittest.TestCase):
         self.assertEqual(p.sender_id, self.smoke.SENDER_ID)
         self.assertEqual(p.header.flags, PacketFlags(0))
 
-    def test_payload_es_el_nickname_sin_prefijo_de_longitud(self):
-        """`AnnouncePayload` es sólo UTF-8: la longitud la da `payload_len`."""
+    def test_esta_announce_es_legacy_y_solo_para_referencia(self):
+        """`construir_announce` es **deliberadamente** del dialecto retirado.
+
+        Su docstring lo dice: existe para mostrar lo que no hay que hacer. El
+        announce real es el TLV de `Identity.announce_packet()`, y la app manda
+        ese.
+
+        Antes este test lo decodificaba con `CURRENT` y esperaba que saliera
+        `AnnouncePayload`. Con el decoder actual eso ya no funciona, y en vez de
+        arreglar el test se deduce **qué** está probando: que un announce legacy
+        **no** se puede leer como actual, que es justo lo que dice la función.
+        """
         crudo = self.smoke.construir_announce("pybitchat-probe")
-        carga = decode_payload(Packet.from_bytes(crudo).header.raw_type,
-                               Packet.from_bytes(crudo).payload, CURRENT)
-        self.assertIsInstance(carga, AnnouncePayload)
-        self.assertEqual(carga.nickname, "pybitchat-probe")
+        p = Packet.from_bytes(crudo)
+
+        # En el dialecto retirado sí es un nickname, y eso es correcto.
+        carga_legacy = decode_payload(p.header.raw_type, p.payload, LEGACY)
+        self.assertIsInstance(carga_legacy, AnnouncePayload)
+        self.assertEqual(carga_legacy.nickname, "pybitchat-probe")
+
+        # Y en el actual **falla**: no es un TLV. Por eso no se usa.
+        with self.assertRaises(Exception):
+            decode_payload(p.header.raw_type, p.payload, CURRENT)
+
+    def test_el_announce_de_identity_si_es_el_tlv_correcto(self):
+        """El que se manda de verdad, el que construye `Identity`."""
+        from pybitchat.protocol.identity import Identity
+
+        ident = Identity.generate("pybitchat-probe")
+        crudo = ident.announce_packet()
+        carga = decode_payload(
+            Packet.from_bytes(crudo).header.raw_type,
+            Packet.from_bytes(crudo).payload,
+            CURRENT,
+        )
+        self.assertIsInstance(carga, IdentityAnnouncement)
+        self.assertEqual(carga.nickname, ident.nickname)
+        self.assertEqual(carga.noise_public_key, ident.noise_public)
 
     def test_round_trip_byte_exacto(self):
         crudo = self.smoke.construir_announce("hola")

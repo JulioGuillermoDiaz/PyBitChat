@@ -45,6 +45,7 @@ import struct
 from dataclasses import dataclass
 from enum import IntEnum
 
+from .identity import IdentityAnnouncement
 from .message import MessagePayload, UnsupportedPayloadField
 from .packet import ProtocolError, Reader
 from .tlv import FileTransferPayload, RequestSyncPayload
@@ -84,6 +85,29 @@ class AnnouncePayload:
 
     def to_bytes(self) -> bytes:
         return self.nickname.encode("utf-8")
+
+
+#: `ANNOUNCE` en el dialecto **actual** es un TLV de identidad, no texto.
+#:
+#: Antes, `ANNOUNCE` en los dos dialectos mapeaba a `AnnouncePayload`, que
+#: implementa la forma **legacy**: sólo el nickname en UTF-8. Con tráfico real
+#: de la app Android eso falla:
+#:
+#:     01 0a 61 6e 65 77 65 6c 6c 73 37 34   TLV 0x01, 10 B, "anewells74"
+#:     02 20 97 35 85 b6 ...                 TLV 0x02, 32 B, clave Noise
+#:     03 20 7a da 9d ab ...                 TLV 0x03, 32 B, clave de firma
+#:
+#: Leer eso como nickname da `UnicodeDecodeError` en la posición 14, que es
+#: justo donde empieza la clave binaria. Parece un problema de codificación
+#: cuando es de formato.
+#:
+#: El formato **ya estaba implementado y probado** en `identity.py`
+#: (`IdentityAnnouncement`), así que aquí no se reimplementa: se delega. La
+#: forma legacy se conserva intacta para `(LEGACY, ANNOUNCE)`, porque **no**
+#: son intercambiables: la legacy no lleva claves, y un anuncio de 9 bytes
+#: ("anonymous") es legacy mientras que uno de 80 B con dos claves de 32 B es
+#: TLV.
+AnnounceTlvPayload = IdentityAnnouncement
 
 
 # --------------------------------------------------------------------------
@@ -415,7 +439,8 @@ def open_question_for(raw_type: int, dialect: str | None) -> str | None:
 
 #: Decoders del dialecto **actual**, indexados por valor crudo.
 _DECODERS_CURRENT: dict[int, type] = {
-    int(MessageType.ANNOUNCE): AnnouncePayload,
+    # TLV de identidad, no nickname suelto. Ver `AnnounceTlvPayload`.
+    int(MessageType.ANNOUNCE): AnnounceTlvPayload,
     int(MessageType.MESSAGE): MessagePayload,
     int(MessageType.NOISE_ENCRYPTED): NoiseCiphertext,
     int(MessageType.FRAGMENT): FragmentPayload,
@@ -426,6 +451,7 @@ _DECODERS_CURRENT: dict[int, type] = {
 
 #: Decoders del dialecto **retirado**, indexados por valor crudo.
 _DECODERS_LEGACY: dict[int, type] = {
+    # La legacy sí es sólo nickname. No se toca: ver `AnnounceTlvPayload`.
     int(LegacyMessageType.ANNOUNCE): AnnouncePayload,
     int(LegacyMessageType.MESSAGE): MessagePayload,
     int(LegacyMessageType.NOISE_ENCRYPTED): NoiseCiphertext,

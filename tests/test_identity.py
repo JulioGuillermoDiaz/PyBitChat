@@ -613,23 +613,57 @@ class TestRellenoObservado(unittest.TestCase):
         self.assertEqual(payload_len, 80)
         self.assertEqual(len(ANNOUNCE_REAL) - 22, payload_len)
 
-    def test_hay_64_bytes_que_la_cabecera_no_declara(self):
-        """El announce ocupa 256 B y sólo declara 102. Los 64 que faltan.
+    def test_los_64_bytes_son_la_firma(self):
+        """Los 64 B que hay entre el payload y el relleno son la firma.
 
-        Empiezan justo tras el payload y no son `0x5a` constante. 64 es el
-        tamaño de una firma Ed25519, y la app manda `0x03` = clave de firma, así
-        que la hipótesis más fuerte es que es una firma. **Probado y no
-        valida** sobre los cinco mensajes candidatos, así que se documenta como
-        campo sin explicar y no como firma.
+        `packet.py` ya definía `SIGNATURE_SIZE = 64` y el parser la lee en el
+        offset correcto. Añadirlos hace que el announce **decodifique**: sin
+        ellos, el parser falla con "truncado leyendo signature: 64 B en offset
+        102".
+
+        Antes este test afirmaba que eran "un campo que la cabecera no declara"
+        y no se reconocía como firma. Era el protocolo que ya teníamos escrito.
         """
-        RELLENO_INICIAL = bytes.fromhex(
+        from pybitchat.protocol.packet import SIGNATURE_SIZE, Packet
+
+        CABECERA = bytes.fromhex("010107000001a10310526d020050")
+        SENDER = bytes.fromhex("34e01ccea10a8c6d")
+        TLV = bytes.fromhex(
+            "010a616e6577656c6c733734"
+            "0220973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b"
+            "03207ada9dab1bec9eb274cfaa0e3489b259d3219f069fe84cb694aa7c5871a61a88"
+        )
+        FIRMA = bytes.fromhex(
             "de0a272249f517047a1c976910a65096bd5a9056c3d7ea73c12aec2123"
             "6879b7a8a0ab8e497701b075175117d8704ad4989a2f3dcba85db14fae"
             "64f5441d1a01"
         )
-        self.assertEqual(len(RELLENO_INICIAL), 64)
-        # No es un bloque constante: si lo fuera, sería relleno.
-        self.assertGreater(len(set(RELLENO_INICIAL)), 16)
+        self.assertEqual(len(FIRMA), SIGNATURE_SIZE)
+
+        # Sin la firma, el announce real **no** se puede leer.
+        from pybitchat.protocol.packet import ProtocolError
+
+        with self.assertRaises(ProtocolError):
+            Packet.from_bytes(CABECERA + SENDER + TLV)
+
+        # Con ella, sí. Y la firma se lee en el sitio correcto.
+        p = Packet.from_bytes(CABECERA + SENDER + TLV + FIRMA)
+        self.assertEqual(len(p.payload), 80)
+        self.assertIsNotNone(p.signature)
+        self.assertEqual(len(p.signature), 64)
+
+    def test_la_app_no_activa_el_flag_de_firma_pero_la_manda(self):
+        """El `flags` del announce real es 0, pero los 64 B están.
+
+        Contradicción real y sin resolver: si el flag dijera la verdad, el
+        parser no los leería. Con `flags=0` funciona porque se los concatenamos
+        a mano; el paquete tal cual, no.
+        """
+        CABECERA = bytes.fromhex("010107000001a10310526d020050")
+        self.assertEqual(CABECERA[3], 0, "el byte de flags no es 0")
+        from pybitchat.protocol.types import PacketFlags
+
+        self.assertFalse(CABECERA[3] & int(PacketFlags.HAS_SIGNATURE))
 
     def test_el_relleno_llega_a_256(self):
         """Lo único que se afirma del relleno es que **tope en 256 B**.

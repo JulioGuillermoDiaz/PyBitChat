@@ -38,6 +38,117 @@ TS = 1_754_073_314_075
 #: UUID con la forma 8-4-4-4-12, 36 caracteres.
 UUID_ID = "4394670B-A5C3-4B48-924E-CB96D1A27AF3"
 
+#: Payload de 80 B del `ANNOUNCE` real de la app Android, capturado el
+#: 2026-10-03. Son `[tipo u8][longitud u8][valor]` tres veces:
+#: nickname, clave Noise y clave de firma.
+ANNOUNCE_REAL_80 = bytes.fromhex(
+    "010a616e6577656c6c733734"
+    "0220973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b"
+    "03207ada9dab1bec9eb274cfaa0e3489b259d3219f069fe84cb694aa7c5871a61a88"
+)
+
+
+class TestAnnounceTlv(unittest.TestCase):
+    """`ANNOUNCE` del dialecto actual es un TLV de identidad, no un nickname.
+
+    El bug que estos tests fijan: `ANNOUNCE` mapeaba a `AnnouncePayload`, que
+    implementa la forma **legacy** (sólo nickname en UTF-8). Con el announce real
+    de 80 B eso da `UnicodeDecodeError` en la posición 14, que es justo donde
+    empieza la clave binaria.
+
+    Parecía un problema de codificación y era de formato.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pybitchat.protocol.payloads import (
+            AnnounceTlvPayload,
+            CURRENT,
+            LEGACY,
+            decode_payload,
+        )
+
+        # `staticmethod` es **obligatorio**, no un detalle de estilo: una función normal
+        # asignada en la clase de un TestCase se convierte en método enlazado
+        # y se come el primer argumento. El síntoma es desconcertante:
+        # `self.dec(0x01, payload, dialect)` falla diciendo "4 argumentos dados"
+        # cuando se han pasado 3, y `inst.dec.__module__` sigue diciendo
+        # `payloads`, que es lo que hace dudar de que sea otra función.
+        cls.dec = staticmethod(decode_payload)
+        cls.CURRENT = CURRENT
+        cls.LEGACY = LEGACY
+        cls.Tlv = AnnounceTlvPayload
+
+    def test_decodifica_el_announce_real(self):
+        c = self.dec(0x01, ANNOUNCE_REAL_80, self.CURRENT)
+        self.assertEqual(c.nickname, "anewells74")
+
+    def test_extrae_las_tres_claves_del_tlv(self):
+        """Es lo que la forma legacy no podía dar: nickname y dos claves."""
+        c = self.dec(0x01, ANNOUNCE_REAL_80, self.CURRENT)
+        self.assertEqual(len(c.noise_public_key), 32)
+        self.assertEqual(len(c.signing_public_key), 32)
+        self.assertEqual(
+            c.noise_public_key.hex(),
+            "973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b",
+        )
+        self.assertEqual(
+            c.signing_public_key.hex(),
+            "7ada9dab1bec9eb274cfaa0e3489b259d3219f069fe84cb694aa7c5871a61a88",
+        )
+
+    def test_round_trip_byte_exacto(self):
+        """Re-codificar da los mismos 80 B. Sin esto, el TLV se aceptaría al
+        leer pero se escribiría distinto, y al reenviar el anuncio de otro peer
+        se leería mal."""
+        c = self.dec(0x01, ANNOUNCE_REAL_80, self.CURRENT)
+        self.assertEqual(c.to_bytes(), ANNOUNCE_REAL_80)
+
+    def test_el_announce_real_no_cabe_en_la_forma_legacy(self):
+        """La forma legacy **falla** con estos bytes. No es que sea peor: es
+        que no aplica. Por eso la legacy se conserva aparte."""
+        with self.assertRaises(UnicodeDecodeError):
+            self.dec(0x01, ANNOUNCE_REAL_80, self.LEGACY)
+
+    def test_la_legacy_sigue_siendo_nickname(self):
+        """Lo legacy no se toca: 9 bytes de texto, sin claves."""
+        c = self.dec(0x01, b"anonymous", self.LEGACY)
+        self.assertEqual(c.nickname, "anonymous")
+
+    def test_el_peer_id_se_deriva_de_la_clave_ruido(self):
+        """`peer_id = sha256(clave Noise)[:8]`. Es el mismo criterio con el que
+        se identifican los peers en el anuncio, y aquí se comprueba contra una
+        clave real."""
+        from pybitchat.protocol.identity import peer_id_from_noise_key
+
+        c = self.dec(0x01, ANNOUNCE_REAL_80, self.CURRENT)
+        self.assertEqual(
+            peer_id_from_noise_key(c.noise_public_key).hex(), "34e01ccea10a8c6d"
+        )
+
+    def test_el_sender_id_de_la_captura_coincide_con_el_peer_id(self):
+        """El `sender_id` del paquete era 34e01ccea10a8c6d, y sale de la clave
+        Noise del propio announce. Las dos piezas encajan: el paquete no está
+        manipulado ni es de otro peer."""
+        from pybitchat.protocol.identity import peer_id_from_noise_key
+
+        SENDER_DEL_PAQUETE = bytes.fromhex("34e01ccea10a8c6d")
+        c = self.dec(0x01, ANNOUNCE_REAL_80, self.CURRENT)
+        self.assertEqual(peer_id_from_noise_key(c.noise_public_key),
+                         SENDER_DEL_PAQUETE)
+
+    def test_sin_claves_es_un_announce_incompleto(self):
+        """Falta la clave de firma: se rechaza, no se acepta a medias."""
+        from pybitchat.protocol.packet import ProtocolError
+
+        sin_firma = (
+            bytes.fromhex("010a616e6577656c6c733734")
+            + bytes.fromhex("0220973585b6502836ff5767934bdb4c624"
+                            "58c48b87e94c02d470797e93d21052f6b")
+        )
+        with self.assertRaises(ProtocolError):
+            self.dec(0x01, sin_firma, self.CURRENT)
+
 
 class TestMessageCompleto(unittest.TestCase):
     """Los 8 flags de `MessagePayload`, en orden ascendente."""
