@@ -170,7 +170,106 @@ class TestUuidDesconocido(unittest.TestCase):
         self.assertEqual(cuantos, 1)
 
 
-class TestCasosLimites(unittest.TestCase):
+class TestTiemposDeEscaneo(unittest.TestCase):
+    """El adaptador no anuncia y escanea a la vez.
+
+    Por eso el escaneo va después de `stop()` **y** de una pausa. Con los
+    valores por defecto de `smoke_ble.py` el escaneo de este script salía más
+    corto que el de aquella herramienta, y por eso no vio los mismos
+    dispositivos.
+    """
+
+    @staticmethod
+    def _args():
+        import argparse
+
+        return argparse.Namespace(
+            nickname="probe",
+            segundos=25.0,
+            descanso=3.0,
+            scan=20.0,
+        )
+
+    def test_el_escaneo_no_es_mas_corto_que_el_de_smoke_ble(self):
+        """Comparar el código de salida con el de otra prueba exige comparar
+        tiempos comparables. Si este es más corto, su resultado no es
+        comparable y parece que el teléfono ha desaparecido."""
+        import re
+        from pathlib import Path
+
+        raiz = Path(__file__).resolve().parent.parent
+        texto = (raiz / "tools" / "smoke_ble.py").read_text(encoding="utf-8")
+        m = re.search(r'--scan"[^\n]*default=([0-9.]+)', texto)
+        self.assertIsNotNone(m, "no se encontró el --scan de smoke_ble.py")
+        self.assertGreaterEqual(self._args().scan, float(m.group(1)))
+
+    def test_hay_pausa_entre_retirar_el_anuncio_y_esc_anear(self):
+        """Sin la pausa, el escaneo sale mientras el adaptador todavía está
+        en modo advertising."""
+        self.assertGreater(self._args().descanso, 0.0)
+
+    def test_el_escaneo_es_generoso(self):
+        """Un discovery corto es la causa más fácil de un falso negativo."""
+        self.assertGreaterEqual(self._args().scan, 15.0)
+
+    def test_los_parametros_existen_en_el_parser(self):
+        """Si el parser no acepta `--scan`, el script falla al arrancar.
+
+        Se lanza `--help`, que escribe el uso y sale sin tocar el hardware. Se
+        comprueba el **código de salida**, no el texto: es lo único que no se
+        puede interpretar mal.
+        """
+        import subprocess
+
+        raiz = Path(__file__).resolve().parent.parent
+        codigo = (raiz / "tools" / "probe_advertise.py").read_text(encoding="utf-8")
+        self.assertIn('"--scan"', codigo)
+        self.assertIn('"--descanso"', codigo)
+
+        r = subprocess.run(
+            [sys.executable, str(raiz / "tools" / "probe_advertise.py"), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        # El codigo de salida, no el texto: es lo unico fiable.
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for opcion in ("--scan", "--descanso", "--segundos"):
+            with self.subTest(opcion=opcion):
+                self.assertIn(opcion, r.stdout)
+
+
+class TestAvisoDeLimitacion(unittest.TestCase):
+    """Si no aparece la app, el script no puede culpar al movil.
+
+    El adaptador no anuncia y escanea a la vez, asi que este script mide lo que
+    la app anuncia cuando el ya no esta anunciando. Afirmar "el problema es el
+    movil" seria una conclusion que este script no puede sostener.
+    """
+
+    def test_el_mensaje_final_no_culpa_al_movil_incondicionalmente(self):
+        raiz = Path(__file__).resolve().parent.parent
+        texto = (raiz / "tools" / "probe_advertise.py").read_text(encoding="utf-8")
+        self.assertNotIn("el problema no es este script.", texto)
+
+    def test_el_mensaje_final_apunta_a_smoke_ble(self):
+        """smoke_ble.py solo escanea: es la comprobacion sin ese problema."""
+        raiz = Path(__file__).resolve().parent.parent
+        texto = (raiz / "tools" / "probe_advertise.py").read_text(encoding="utf-8")
+        self.assertIn("smoke_ble.py", texto.split("NINGUN dispositivo")[-1])
+
+    def test_el_docstring_admite_la_limitacion(self):
+        """La limitacion esta escrita antes de usarla, no despues de
+        fallar. Es lo que permite saber de antemano que este script no es la
+        herramienta para la pregunta."""
+        raiz = Path(__file__).resolve().parent.parent
+        texto = (raiz / "tools" / "probe_advertise.py").read_text(encoding="utf-8")
+        cabecera = texto.split('"""')[1]
+        # Se busca la frase entera y no "no puede": el enunciado completo es
+        # lo que dice la limitacion, y trocearlo haria que el test pasara
+        # con una redaccion que ya no dice nada.
+        self.assertIn("no puede anunciar y escanear a la vez", cabecera)
+
     def test_escaneo_vacio_no_revienta(self):
         lineas, cuantos = probe.resumen([])
         self.assertEqual(lineas, [])

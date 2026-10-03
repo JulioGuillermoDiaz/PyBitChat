@@ -16,6 +16,16 @@ anunciar cuando la app pasa a segundo plano.
 
 Distingue los fallos: BlueZ puede rechazar el anuncio entero, y eso es distinto
 de que se anuncie y no nos vean.
+
+## Limitación conocida, y no menor
+
+El adaptador **no puede anunciar y escanear a la vez**. Este script anuncia
+primero y escanea después, así que el escaneo sólo mide lo que el móvil anuncia
+*cuando este script ya no está anunciando*. Si aquí no aparece la app, **no
+significa que la app no anuncie**: puede que sí, y que el problema sea el
+orden de las dos operaciones.
+
+Para esa pregunta, `smoke_ble.py` es la herramienta correcta: sólo escanea.
 """
 
 from __future__ import annotations
@@ -122,11 +132,22 @@ async def principal(args: argparse.Namespace) -> int:
     await anuncio.stop()
     print("anuncio retirado.")
 
+    print(f"\n--- esperando {args.descanso} s a que el adaptador se reponga ---")
+    # El adaptador no puede anunciar y escanear a la vez. Al retirar el
+    # anuncio hay un momento en el que sigue en modo advertising, y un
+    # escaneoImmediate sale corto: por eso el escaneo va después de una pausa,
+    # no inmediatamente después de `stop()`.
+    await asyncio.sleep(args.descanso)
+
     print("\n--- ahora escaneamos a ver qué hay por ahi ---")
     from bleak import BleakScanner
 
-    encontrados = await BleakScanner.discover(timeout=12.0, return_adv=True)
-    print(f"{len(encontrados)} dispositivos\n")
+    # El timeout **no** se deja corto: 12 s fue suficiente en unas pruebas y
+    # en otras no. Un discovery más largo sólo cuesta segundos y da muchos más
+    #devices por descubrir, que es justo lo que estamos buscando. El valor
+    # viene de `--scan` para que sea comparable con el de `smoke_ble.py`.
+    encontrados = await BleakScanner.discover(timeout=args.scan, return_adv=True)
+    print(f"{len(encontrados)} dispositivos en {args.scan:g} s\n")
 
     # Se informa de **todo**, no sólo de lo que tiene nombre o UUID conocido. El
     # filtro de antes (`es_bitchat or dev.name`) ocultaba cinco de los siete
@@ -155,15 +176,31 @@ async def principal(args: argparse.Namespace) -> int:
         print(f"hay {cuantos} dispositivos anunciando BitChat")
     else:
         print("NINGUN dispositivo anuncia BitChat")
-        print("  Si el móvil está desbloqueado y con la app en primer plano,")
-        print("  y no aparece, el problema no es este script.")
+        print()
+        print("  Ojo: este script primero anuncia y **después** escanea, y el")
+        print("  adaptador no hace las dos cosas a la vez. Que aquí no aparezca")
+        print("  la app no demuestra que no esté anunciando.")
+        print()
+        print("  La comprobación que no tiene ese problema es smoke_ble.py,")
+        print("  que sólo escanea. Si ahí aparece, el teléfono anuncia bien y el")
+        print("  problema es el orden anunciar->escanear de este script:")
+        print("      ./.venv/bin/python tools/smoke_ble.py --scan 30")
+        print()
+        print("  Si tampoco aparece en smoke_ble.py, entonces sí es el móvil:")
+        print("  desbloqueado, con BitChat en primer plano, y con el BT activo.")
     return 0
 
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--nickname", default="pybitchat-probe")
-    p.add_argument("--segundos", type=float, default=25.0)
+    p.add_argument("--segundos", type=float, default=25.0,
+                   help="cuánto se anuncia antes de escanear")
+    p.add_argument("--descanso", type=float, default=3.0,
+                   help="pausa entre retirar el anuncio y escanear")
+    p.add_argument("--scan", type=float, default=20.0,
+                   help="duración del escaneo. El mismo nombre que en "
+                        "smoke_ble.py para que las dos pruebas sean comparables")
     args = p.parse_args()
     asyncio.run(principal(args))
     return 0
