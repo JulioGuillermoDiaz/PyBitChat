@@ -239,5 +239,156 @@ class TestSinNoiseProtocol(unittest.TestCase):
         self.assertIn("recibido.bin", src)
 
 
+class TestEstadoDeNoiseprotocol(unittest.TestCase):
+    """La comprobación tiene que distinguir tres casos, no uno.
+
+    Pasó el 2026-10-04: `pip` decía "already satisfied (0.3.1)" y el script
+    imprimía "NO INSTALADO". Se contradecían, y un mensaje falso hace perder una
+    sesión entera porque dice "instala esto" cuando ya está instalado.
+
+    Un `except ImportError` estrecho tiene tres caminos a ese falso negativo:
+    una dependencia ausente dentro del paquete (el error es sobre *ella*, no
+    sobre `noiseprotocol`), algo que Python movió, y `__version__` inexistente
+    (`AttributeError`, que no lo captura `except ImportError`).
+    """
+
+    def test_el_motivo_siempre_explica_algo(self):
+        ok, motivo = probe._estado_noiseprotocol()
+        self.assertIsInstance(motivo, str)
+        self.assertTrue(motivo.strip(), "el motivo está vacío")
+
+    def test_si_esta_instalada_no_dice_que_falta(self):
+        ok, motivo = probe._estado_noiseprotocol()
+        if not ok:
+            self.skipTest("noiseprotocol no está en esta máquina")
+        self.assertNotIn("no está", motivo)
+        self.assertNotIn("pip install", motivo)
+
+    def test_si_ausente_dice_como_instalarla(self):
+        ok, motivo = probe._estado_noiseprotocol()
+        if ok:
+            self.skipTest("noiseprotocol está en esta máquina")
+        self.assertIn("no está", motivo)
+        self.assertIn("pip install", motivo)
+
+    def test_el_camino_de_paquete_roto_esta_escrito(self):
+        """Que exista una rama para "está pero no importa".
+
+        **No se puede simular** con `sys.modules`: poner `None` hace que
+        `find_spec` devuelva `None` también, así que la función ve "no existe"
+        y no hay forma de llegar a la otra rama. Comprobado.
+
+        Se comprueba el texto, que es lo verificable sin un paquete roto de
+        verdad en disco. El comportamiento viene fijado por los otros tests: si
+        la librería está, no dice que falta.
+        """
+        import io
+        from pathlib import Path as _P
+
+        raiz = _P(__file__).resolve().parent.parent
+        src = io.open(raiz / "tools" / "probe_msg2.py", encoding="utf-8").read()
+        self.assertIn("el paquete está pero su import falla", src)
+        self.assertIn("el paquete está pero al importarlo salta", src)
+
+
+class TestSaltoDelRelleno(unittest.TestCase):
+    """El recorrido tiene que saltarse el relleno, no leerlo como cabecera.
+
+    Pasó el 2026-10-04: se paraba en el offset 166 con "versión de protocolo
+    desconocida: 0x5a". El 166 era **correcto** —el announce ocupa 166 en el
+    cable, con su firma— y lo que faltaba era saltar los 90 de relleno.
+    """
+
+    @staticmethod
+    def _announce_real() -> bytes:
+        """166 B exactos: 14 cabecera + 8 sender + 80 TLV + 64 firma."""
+        return bytes.fromhex(
+            "010107000001a10310526d020050"          # cabecera, flags=0x02
+            "34e01ccea10a8c6d"                      # sender
+            "010a616e6577656c6c733734"              # TLV 0x01 nickname
+            "0220973585b6502836ff5767934bdb4c62458c"
+            "48b87e94c02d470797e93d21052f6b"         # TLV 0x02 Noise
+            "03207ada9dab1bec9eb274cfaa0e3489b2"
+            "59d3219f069fe84cb694aa7c5871a61a88"     # TLV 0x03 firma
+            + "00" * 64                              # la firma (cualquiera)
+        )
+
+    def _con_relleno(self) -> bytes:
+        real = self._announce_real()
+        return real + bytes([256 - len(real)]) * (256 - len(real))
+
+    def test_un_paquete_rellenado_se_lee_entero(self):
+        leidos = probe.leer_paquetes(self._con_relleno())
+        self.assertEqual(len(leidos), 1)
+        self.assertEqual(len(leidos[0].payload), 80)
+        self.assertEqual(len(leidos[0].signature), 64)
+
+    def test_tres_paquetes_rellenados_se_leen_tres(self):
+        """El caso real: el fichero de 768 B del usuario."""
+        leidos = probe.leer_paquetes(self._con_relleno() * 3)
+        self.assertEqual(len(leidos), 3)
+
+    def test_sin_relleno_tambien_funciona(self):
+        """El salto es condicional: un paquete sin relleno va igual."""
+        leidos = probe.leer_paquetes(self._announce_real())
+        self.assertEqual(len(leidos), 1)
+
+    def test_relleno_no_pkcs7_no_revienta(self):
+        """Un relleno que no es PKCS#7 se para con un mensaje, no con una
+        excepción sin contexto."""
+        real = self._announce_real()
+        leidos = probe.leer_paquetes(real + bytes([0x01, 0x02] * 45))
+        self.assertGreaterEqual(len(leidos), 1)
+
+    def test_paquetes_sin_relleno_pegados_no_se_comen(self):
+        """El falso positivo que Almost se cuela.
+
+        Una comprobación floja del relleno —"si el byte siguiente está
+        repetido, es relleno"— se come el principio del paquete siguiente cuando
+        **no** hay relleno. Tras un paquete de 166 B, el byte 167 es `0x01`, el
+        168 `0x10`, y eso parece un relleno de 1 B.
+
+        Se exige además que tras el relleno empiece un paquete **legible**, que
+        es lo que corta el falso positivo.
+        """
+        import struct
+
+        def cab(tipo, plen, flags=0x02):
+            ts = struct.pack(">Q", 1)
+            return (
+                struct.pack(">B", 1) + struct.pack(">B", tipo)
+                + struct.pack(">B", 7) + ts
+                + struct.pack(">B", flags) + struct.pack(">H", plen)
+            )
+
+        snd = bytes.fromhex("34e01ccea10a8c6d")
+        p1 = cab(1, 80) + snd + bytes(80) + bytes(64)      # 166 B
+        p2 = cab(0x10, 96) + snd + bytes(96) + bytes(64)   # 182 B
+        p3 = cab(0x21, 16, 0x00) + snd + bytes(16)         # 38 B
+        leidos = probe.leer_paquetes(p1 + p2 + p3)
+        self.assertEqual(len(leidos), 3)
+        self.assertEqual(
+            [p.header.raw_type for p in leidos], [0x01, 0x10, 0x21]
+        )
+
+    def test_la_longitud_en_cable_no_usa_to_bytes(self):
+        """Re-serializar puede dar una longitud distinta de la que ocupa el
+        original: `to_bytes` omite lo que el paquete no declara."""
+        import struct
+
+        from pybitchat.protocol.packet import Packet, PacketHeader
+
+        ts = struct.pack(">Q", 1)
+        cab = PacketHeader(
+            version=1, raw_type=int(MessageType.NOISE_HANDSHAKE), ttl=7,
+            timestamp=0, flags=PacketFlags(0x02), payload_len=96,
+        )
+        p = Packet(
+            header=cab, sender_id=bytes(8), payload=bytes(96), signature=bytes(64)
+        )
+        # 14 + 8 sender + 96 payload + 64 firma = 182
+        self.assertEqual(probe._longitud_en_cable(p), 14 + 8 + 96 + 64)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

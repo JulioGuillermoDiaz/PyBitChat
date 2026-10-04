@@ -42,6 +42,7 @@ if str(RAIZ / "src") not in sys.path:
 
 from pybitchat.noise.session import HandshakeSession  # noqa: E402
 from pybitchat.protocol.identity import Identity, peer_id_from_noise_key  # noqa: E402
+from pybitchat.protocol.types import PEER_ID_SIZE  # noqa: E402
 from pybitchat.protocol.packet import Packet, ProtocolError  # noqa: E402
 from pybitchat.protocol.types import MessageType  # noqa: E402
 
@@ -58,33 +59,156 @@ def _error(msg: str) -> None:
     print(f"  ERROR: {msg}")
 
 
-def leer_paquetes(datos: bytes) -> list[Packet]:
-    """Parte el fichero en paquetes, usando la longitud que declara cada uno.
+def _estado_noiseprotocol() -> tuple[bool, str]:
+    """¿Se puede importar `noiseprotocol`? Devuelve `(ok, motivo)`.
 
-    No se asume un tamaño fijo. Un paquete relleno a 256 B tiene 256 bytes en
-    el cable pero su longitud real es menor, y recorrer a saltos de 256
-   Syncronía  el siguiente paquete por el sitio equivocado.
+    ## Por qué no basta con `try: import` / `except ImportError`
+
+    Pasó el 2026-10-04: `pip` decía "already satisfied (0.3.1)" y el script
+    imprimía "NO INSTALADO". Se contradecían y el script mentía.
+
+    Un `except ImportError` estrecho tiene **tres** formas de producir un
+    "no instalado" falso:
+
+    1. `noiseprotocol/__init__.py` hace `from X import Y` y X no está. El
+       `ImportError` que salta es **sobre X**, no sobre `noiseprotocol`, pero el
+       mensaje dice que el paquete falta.
+    2. El paquete importa algo que Python 3.14 movió o quitó. Mismo caso.
+    3. El import va bien pero `__version__` no existe: eso es `AttributeError`,
+       que no lo captura un `except ImportError` y mata el script.
+
+    Aquí se distingue cada caso y **se da el motivo real**, que es lo que
+    permite arreglarlo. Un "no disponible" sin motivo obliga a adivinar.
     """
-    paquetes: list[Packet] = []
+    import importlib.util
+
+    # Primero, ¿existe el paquete? Eso no lanza nada.
+    try:
+        spec = importlib.util.find_spec("noiseprotocol")
+    except Exception as exc:
+        return False, f"no se puede inspeccionar: {type(exc).__name__}: {exc}"
+
+    if spec is None:
+        return False, (
+            "el paquete no está en este intérprete. "
+            "Instálalo con: ./.venv/bin/pip install -r requirements.txt"
+        )
+
+    # Existe. Ahora, ¿importa?
+    try:
+        import noiseprotocol  # noqa: F401
+    except ImportError as exc:
+        # El paquete está pero le falta algo. El motivo importa: no es lo
+        # mismo que "no instalado", y la reparación es distinta.
+        return False, (
+            f"el paquete está pero su import falla: {exc}. Eso casi siempre es "
+            f"una dependencia suya ausente o incompatible con esta versión de "
+            f"Python, no el paquete en sí."
+        )
+    except Exception as exc:
+        return False, (
+            f"el paquete está pero al importarlo salta "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+    # Importó. `__version__` puede no existir, y no es motivo para fallar.
+    version = getattr(noiseprotocol, "__version__", None)
+    if version is None:
+        return True, "instalada, sin `__version__`"
+    return True, f"instalada, versión {version}"
+
+
+def _longitud_en_cable(p) -> int:
+    """Cuántos bytes ocupa el paquete en el cable, **sin relleno**.
+
+    No se usa `len(p.to_bytes(...))` a propósito: eso **re-serializa** el
+    paquete, y si un flag no cuadra con los bytes, la longitud que devuelve no es
+    la que ocupa el original. Con `recipient_id` sin su flag es justo lo que
+    pasa, y el recorrido se descuadra sin que se note.
+
+    Se suma lo que el propio paquete declara, que es lo que dice el formato:
+
+        cabecera + sender + [recipient] + payload + [firma]
+    """
+    total = p.header.header_size + PEER_ID_SIZE
+    if p.recipient_id is not None:
+        total += PEER_ID_SIZE
+    if p.route:
+        total += 1 + len(p.route) * PEER_ID_SIZE
+    total += len(p.payload)
+    if p.signature is not None:
+        total += len(p.signature)
+    return total
+
+
+def _salta_relleno(datos: bytes, inicio: int, largo: int) -> int:
+    """Cuánto ocupa el relleno que sigue, o 0 si no lo hay.
+
+    ## La condición tiene que ser estricta, o se come paquetes
+
+    BitChat rellena a **256 B** con PKCS#7. Un salto ingenuo —"si el byte
+    siguiente está repetido, es relleno"— falla con paquetes **sin** relleno
+    pegados: tras un paquete de 166 B, el byte 167 es `0x01`, el 168 `0x10`, y
+    una comprobación floja se los come como si fueran relleno.
+
+    Por eso se exigen las **dos** condiciones de PKCS#7 a la vez:
+
+    1. Los `n` bytes siguientes son todos iguales a su propio valor.
+    2. Al avanzar `n` bytes, el paquete que hay tiene una cabecera **válida**.
+
+    La segunda es la que corta el falso positivo: sin ella, un byte `0x01`
+    suelto parece un relleno de 1 B. Con ella, sólo se acepta algo que además
+    deja un paquete legible.
+    """
+    pos = inicio + largo
+    if largo <= 0 or pos >= len(datos):
+        return 0
+    byte = datos[pos]
+    if byte == 0 or pos + byte > len(datos):
+        return 0
+    if datos[pos : pos + byte] != bytes([byte]) * byte:
+        return 0
+    # Condición 2: tras el relleno debe empezar un paquete que se pueda leer.
+    if not _cabecera_valida(datos, pos + byte):
+        return 0
+    return byte
+
+
+def _cabecera_valida(datos: bytes, pos: int) -> bool:
+    """¿En `pos` empieza un paquete que el parser acepta?"""
+    try:
+        Packet.from_bytes(datos[pos:])
+    except (ProtocolError, IndexError, ValueError):
+        return False
+    return True
+
+
+def leer_paquetes(datos: bytes) -> list:
+    """Parte el fichero en paquetes, saltando el relleno de cada uno.
+
+    Se avanza por la longitud **declarada** más el relleno, nunca por un tamaño
+    supuesto. Los dos motivos se Pagaron el 2026-10-04:
+
+    - Un paquete relleno a 256 B ocupa 166 en el cable. Recorrer a saltos de 256
+      mete el siguiente paquete en el sitio equivocado.
+    - Sin saltar el relleno, los `0x5a` se leen como cabecera.
+    """
+    paquetes = []
     offset = 0
     while offset < len(datos):
         resto = datos[offset:]
         try:
             p = Packet.from_bytes(resto)
         except (ProtocolError, IndexError, ValueError) as exc:
-            _error(
-                f"no se pudo leer un paquete en el offset {offset}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            print(f"  (se han leído {len(paquetes)} paquete(s) antes del fallo)")
+            print(f"  se para en el offset {offset}: {exc}")
+            print(f"  (se han leído {len(paquetes)} paquete(s) antes)")
             break
         paquetes.append(p)
-        # Se avanza por el tamaño **declarado**, no por el del fichero.
-        largo = len(p.to_bytes(include_padding=False))
+        largo = _longitud_en_cable(p)
         if largo <= 0:
             _error(f"paquete de tamaño 0 en el offset {offset}; parando")
             break
-        offset += largo
+        offset += largo + _salta_relleno(datos, offset, largo)
     return paquetes
 
 
@@ -161,12 +285,11 @@ def desglosar(msg2: bytes) -> list[str]:
 def probar_read(msg2: bytes, identidad: Identity) -> None:
     """Intenta leer el `msg2` con la identidad real y dice qué queda puesto."""
     print("\n--- read_handshake con la identidad real ---")
-    try:
-        import noiseprotocol  # noqa: F401
-    except ImportError:
+    ok, motivo = _estado_noiseprotocol()
+    if not ok:
         # Se dice aquí, y no antes, para que el desglose de arriba ya haya salido.
-        print("  omitido: `noiseprotocol` no está instalado, así que no se")
-        print("  puede descifrar. Los pasos anteriores no lo necesitan.")
+        print(f"  omitido: {motivo}")
+        print("  Los pasos anteriores no necesitan la librería.")
         return
 
     sesion = HandshakeSession(
@@ -226,16 +349,7 @@ def main() -> int:
     #
     # Se comprueba más abajo, donde se usa, para que la falta se note en su
     # sitio y no impida el resto.
-    hay_noise = True
-    try:
-        import noiseprotocol
-        print(f"noiseprotocol: {getattr(noiseprotocol, '__version__', '?')}")
-    except ImportError:
-        hay_noise = False
-        print("noiseprotocol: NO INSTALADO")
-        print("  Se puede leer y desglosar el msg2 igualmente; sólo falta")
-        print("  el paso de descifrarlo. Se instala con:")
-        print("    ./.venv/bin/pip install -r requirements.txt")
+    hay_noise, motivo_noise = _estado_noiseprotocol()
 
     identidad = Identity.cargar_o_crear("pybitchat-probe")
     print(f"identidad:  peer_id={identidad.peer_id_hex}")
