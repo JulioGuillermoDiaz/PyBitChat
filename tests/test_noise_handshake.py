@@ -366,6 +366,44 @@ class TestParserDeHex(unittest.TestCase):
         self.assertIn("' '", str(ctx.exception))
 
 
+class TestAnnounceComoPresentacion(unittest.TestCase):
+    """Un announce no lleva `recipient_id`: **esa** es la razón de ser del tipo.
+
+    Esto sobrevivió al revert del orden announce→handshake, porque sigue siendo
+    cierto y no depende de que mandemos uno u otro. Lo que se retiró fue la
+    hipótesis de que el announce ayudara al handshake; que un announce sin
+    destinatario es una presentación es otro hecho, y está en
+    `MessageHandler.kt`: sin `recipient_id` va a todos.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from pybitchat.protocol.identity import Identity
+
+        cls.ident = Identity.generate("pybitchat-probe")
+        cls.paquete = cls.ident.announce_packet(ttl=3)
+
+    def test_el_announce_no_lleva_recipient(self):
+        p = Packet.from_bytes(self.paquete)
+        self.assertIsNone(p.recipient_id)
+
+    def test_el_announce_no_activa_el_flag_de_recipient(self):
+        """Sin el flag, ni el parser lo lee. Es lo que lo hace broadcast."""
+        p = Packet.from_bytes(self.paquete)
+        self.assertFalse(p.header.flags & PacketFlags.HAS_RECIPIENT)
+
+    def test_el_handshake_si_lleva_recipient(self):
+        """El contraste que importa: el handshake **sí** va dirigido, y por eso
+        la app lo acepta (`MessageHandler.kt:375`). Si fuera broadcast, se
+        descartaría en silencio."""
+        handshake, _sesion = iniciar_handshake(
+            self.ident, peer_id_remoto=PEER_APP
+        )
+        p = Packet.from_bytes(handshake)
+        self.assertEqual(p.recipient_id, PEER_APP)
+        self.assertTrue(p.header.flags & PacketFlags.HAS_RECIPIENT)
+
+
 class TestRetiradaDeCompletarHandshake(unittest.TestCase):
     """`completar_handshake` **no** debe volver, y por qué.
 
@@ -417,113 +455,6 @@ class TestRetiradaDeCompletarHandshake(unittest.TestCase):
         self.assertTrue(hasattr(self.mod, "iniciar_handshake"))
 
 
-class TestOrdenAnnounceAntesQueHandshake(unittest.TestCase):
-    """El announce va **primero**, y esto se comprueba.
-
-    ## Por qué
-
-    El 2026-10-04 la sesión con `--handshake` **no** recibió ningún
-    `NOISE_HANDSHAKE`: solo 2 announces y un `REQUEST_SYNC`. En el móvil no
-    aparecía ningún par nuevo.
-
-    En modo `--handshake` se mandaba **sólo** el handshake. Sin announcement
-    previo, la app no sabe quiénes somos ni tiene un par al que dirigirlo. La
-    hipótesis más simple: el orden, no el formato.
-
-    ## Lo que este test fija
-
-    Que `_preparar` devuelve **ambos** paquetes, y que son distintos: el
-    announce es un ANNOUNCE dirigido a nadie y el handshake es un
-    NOISE_HANDSHAKE dirigido al `peer_id` de la app. Confundirlos sería un
-    fallo silencioso: el announce sin `recipient_id` no lo acepta nadie como
-    presentación dirigida.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        import importlib.util
-
-        ruta = ROOT / "tools" / "smoke_ble.py"
-        spec = importlib.util.spec_from_file_location("smoke_orden", ruta)
-        mod = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(mod)
-        cls.smoke = mod
-        cls.ident = Identity.generate("pybitchat-probe")
-
-    def _args(self, **kw):
-        import argparse
-
-        base = dict(
-            nickname="pybitchat-probe", identity=None, paquete=None,
-            segundos=1.0, scan=1.0, timeout=5.0,
-            guardar=ROOT / "capturas" / "recibido.bin",
-            handshake=True, peer_id=PEER_APP, noise_public=None,
-            ttl_handshake=6, pausa=2.0,
-        )
-        base.update(kw)
-        return argparse.Namespace(**base)
-
-    def _preparar(self, **kw):
-        import io
-        from contextlib import redirect_stdout
-
-        with redirect_stdout(io.StringIO()):
-            return self.smoke._preparar(self._args(**kw), self.ident, "X")
-
-    def test_devuelve_los_dos_paquetes(self):
-        _hs, _sesion, presentacion = self._preparar()
-        self.assertIsNotNone(presentacion, "no se construye el announce")
-
-    def test_el_primer_paquete_es_un_announce(self):
-        """El de presentación va primero y es un ANNOUNCE."""
-        _hs, _sesion, presentacion = self._preparar()
-        self.assertEqual(
-            Packet.from_bytes(presentacion).header.raw_type,
-            int(MessageType.ANNOUNCE),
-        )
-
-    def test_el_announce_no_lleva_destinatario(self):
-        """Una presentación **dirigida** no se acepta como presentación: sin
-        `recipient_id` va a todos, que es lo que significa un announce."""
-        _hs, _sesion, presentacion = self._preparar()
-        self.assertIsNone(Packet.from_bytes(presentacion).recipient_id)
-
-    def test_el_handshake_si_lleva_destinatario(self):
-        _hs, _sesion, _presentacion = self._preparar()
-        p = Packet.from_bytes(self._preparar()[0])
-        self.assertEqual(p.header.raw_type, int(MessageType.NOISE_HANDSHAKE))
-        self.assertEqual(p.recipient_id, PEER_APP)
-
-    def test_los_dos_paquetes_son_distintos(self):
-        hs, _sesion, presentacion = self._preparar()
-        self.assertNotEqual(presentacion, hs)
-
-    def test_sin_handshake_no_hay_presentacion(self):
-        """El modo announce puro no manda dos cosas: manda una."""
-        import io
-        from contextlib import redirect_stdout
-
-        args = self._args(handshake=False)
-        with redirect_stdout(io.StringIO()):
-            _paquete, _sesion, presentacion = self.smoke._preparar(
-                args, self.ident, "X"
-            )
-        self.assertIsNone(presentacion)
-
-    def test_la_pausa_es_configurable(self):
-        """Con 0 se mandan seguidos, que es justo lo que se quiere evitar."""
-        import argparse
-        import io
-        from contextlib import redirect_stdout
-
-        with redirect_stdout(io.StringIO()):
-            self.smoke._preparar(self._args(pausa=0.0), self.ident, "X")
-        # El valor se usa en `_sesion`; aquí se comprueba que se acepta 0 sin
-        # romperse, que es lo que un usuario haría para forzar el caso.
-        self.assertEqual(argparse.Namespace(pausa=0.0).pausa, 0.0)
-
-
 class TestSmokeBle(unittest.TestCase):
     """`_preparar` decide qué se envía. Un fallo aquí es silencioso.
 
@@ -560,7 +491,6 @@ class TestSmokeBle(unittest.TestCase):
             peer_id=None,
             noise_public=None,
             ttl_handshake=TTL_HANDSHAKE,
-            pausa=2.0,
         )
         base.update(kw)
         return argparse.Namespace(**base)
@@ -572,7 +502,7 @@ class TestSmokeBle(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            paquete, _sesion, _presentacion = self.smoke._preparar(
+            paquete, _ = self.smoke._preparar(
                 self._args(), self.ident, "AA:BB:CC:DD:EE:FF"
             )
         self.assertEqual(Packet.from_bytes(paquete).header.raw_type,
@@ -584,7 +514,7 @@ class TestSmokeBle(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            paquete, _sesion, _presentacion = self.smoke._preparar(
+            paquete, _ = self.smoke._preparar(
                 self._args(handshake=True, peer_id=PEER_APP), self.ident, "X"
             )
         p = Packet.from_bytes(paquete)
@@ -623,7 +553,7 @@ class TestSmokeBle(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            _paquete, sesion, _presentacion = self.smoke._preparar(
+            _paquete, sesion = self.smoke._preparar(
                 self._args(handshake=True, peer_id=PEER_APP), self.ident, "X"
             )
         self.assertIsNotNone(sesion)
@@ -638,7 +568,7 @@ class TestSmokeBle(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            _paquete, sesion, _pres = self.smoke._preparar(self._args(), self.ident, "X")
+            _paquete, sesion = self.smoke._preparar(self._args(), self.ident, "X")
         self.assertIsNone(sesion)
 
     def test_el_ttl_del_handshake_es_configurable(self):
@@ -647,7 +577,7 @@ class TestSmokeBle(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            paquete, _sesion, _presentacion = self.smoke._preparar(
+            paquete, _ = self.smoke._preparar(
                 self._args(handshake=True, peer_id=PEER_APP, ttl_handshake=1),
                 self.ident, "X",
             )

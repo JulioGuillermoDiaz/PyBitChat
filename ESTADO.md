@@ -182,6 +182,28 @@ vuelva.
 Escribir un `msg3` sin saber el formato del `msg2` es adivinar en la unica parte
 del protocolo donde adivinar es criptograficamente grave.
 
+### El announce NO va antes del handshake (revertido)
+
+Se probó y **empeoró** las cosas. La comparación de las dos ejecuciones:
+
+| | Enviado | `msg2` |
+|---|---|---|
+| 04-oct | handshake **solo** | ✅ 96 B |
+| 05-oct | announce **+** handshake | ❌ ninguno |
+
+La hipótesis era que sin presentación previa la app no tiene un par al que
+dirigir el handshake —el móvil no mostraba ninguno—. **No se comprobó que el
+handshake ya funcionara sin announce**, y funcionaba, con dos sesiones de
+evidencia. El dato que lo refutaba estaba en este mismo documento desde el
+03-oct.
+
+Revertido en `2f300bb` (vuelto atrás en el commit siguiente).
+
+Lo que **no** se revierte, porque sigue siendo cierto y no depende del orden:
+un announce **no** lleva `recipient_id` —eso es lo que lo hace broadcast— y el
+handshake **sí** lo lleva, que es lo que hace que la app lo acepte
+(`MessageHandler.kt:375`).
+
 ### Como investigarlo
 
 ```bash
