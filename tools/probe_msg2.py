@@ -50,9 +50,18 @@ from pybitchat.protocol.types import MessageType  # noqa: E402
 TIPO_HANDSHAKE = int(MessageType.NOISE_HANDSHAKE)
 
 #: Tamaños de los tokens de XX. `E` va en claro (32 B); lo cifrado lleva un
-#: tag Poly1305 de 16 B, así que 32 + 16 = 48.
+#: tag Poly1305 de 16 B, asi que 32 + 16 = 48.
 LEN_E = 32
 LEN_CIFRADO = 48
+
+#: El tag solo. `ChaChaPolyCipherState.getMACLength()` lo devuelve **si ya hay
+#: clave**: en `msg1` no la hay y el payload vacio no produce tag; en `msg2` ya
+#: la hay (el token `EE` es el primer `mixKey`) y produce 16.
+LEN_TAG = 16
+
+#: Los tres tamanos, importados del modulo que los deriva. Una sola fuente: si
+#: la derivacion cambia, el informe cambia con ella.
+from pybitchat.noise.handshake import MSG2_SIZE  # noqa: E402
 
 
 def _error(msg: str) -> None:
@@ -213,72 +222,100 @@ def leer_paquetes(datos: bytes) -> list:
 
 
 def desglosar(msg2: bytes) -> list[str]:
-    """Parte `msg2` según los tokens de XX. Devuelve líneas legibles.
+    """Parte `msg2` en los tokens de XX. Devuelve lineas legibles.
 
-    El desglose por tokens ** presupone que el patrón es XX canónico. Con un
-    `msg2` que no lo es, las líneas son aritmética sobre una suposición y no
-    dicen nada del formato real.
+    ## El desglose, y por que estos numeros
 
-    Por eso, cuando los tamaños no cuadran, el informe lo dice y **no** presenta
-    el reparto como si fuera el bueno. Un informe que muestra
-    "S -> 16 B" sin avisar de que el patrón no es XX lleva a debuggear un token
-    que no existe.
+    El patron `noise_pattern_XX` de `Pattern.java` es:
+
+        1:E 2:FLIP 3:E 4:EE 5:S 6:ES 7:FLIP 8:S 9:SE
+
+    Asi que `msg2` son los indices 3 a 6, mas el tag de carga vacia que
+    `writeMessage` anade al final. Y ese tag sale porque **ya hay clave**: el
+    token `EE` es el primer `mixKey` del handshake.
+
+    `ChaChaPolyCipherState` dice:
+
+        getMACLength() = haskey ? 16 : 0
+        if (!haskey) { arraycopy(...); return length; }   // sin tag
+
+    De ahi, token a token:
+
+    | token | que hace                     | bytes |
+    |---|---|---|
+    | `E`  | clave efimera en claro       | 32 |
+    | `EE` | `mixDH`: deriva clave        |  0 |
+    | `S`  | estatica cifrada (32 + tag)  | 48 |
+    | `ES` | `mixDH`: deriva clave        |  0 |
+    | carga vacia, ya con clave       | 16 |
+    | **total**                        | **96** |
+
+    `EE` y `ES` ocupan **cero**. Contarlos como 48 es lo que produjo las 176 y
+    las 128 que se dijeron entre el 03-oct y el 05-oct.
     """
     lineas = []
     restante = len(msg2)
-    # msg2 de XX = `E, EE, S, ES`
-    for nombre, largo in (
-        ("E", LEN_E),
-        ("EE", LEN_CIFRADO),
-        ("S", LEN_CIFRADO),
-        ("ES", LEN_CIFRADO),
+
+    for nombre, largo, nota in (
+        ("E", LEN_E, "efimera en claro"),
+        ("EE", 0, "mixDH: deriva clave, no emite bytes"),
+        ("S", LEN_CIFRADO, "estatica cifrada: 32 + tag"),
+        ("ES", 0, "mixDH: deriva clave, no emite bytes"),
+        ("", LEN_TAG, "tag de la carga vacia (ya hay clave)"),
     ):
+        if nombre == "":
+            lineas.append(f"  --  -> {LEN_TAG:3d} B  {nota}")
+            restante -= LEN_TAG
+            continue
         if restante <= 0:
             break
         tomado = min(largo, restante)
+        if largo == 0:
+            lineas.append(f"  {nombre:3} ->   0 B  {nota}")
+            continue
         if tomado == largo:
-            lineas.append(f"  {nombre:3} -> {tomado:3d} B (quedan {restante - tomado})")
-        else:
-            # No queda sitio para el token entero. Se dice explícitamente en
-            # vez de escribir un tamaño que no es real.
             lineas.append(
-                f"  {nombre:3} -> {tomado:3d} B de {largo} (NO CABE; "
-                f"quedan {restante})"
+                f"  {nombre:3} -> {tomado:3d} B  {nota} (quedan {restante - tomado})"
+            )
+        else:
+            # No queda sitio para el token entero. Se dice en vez de escribir un
+            # tamano que no es real.
+            lineas.append(
+                f"  {nombre:3} -> {tomado:3d} B de {largo} (NO CABE; quedan {restante})"
             )
         restante -= largo
 
-    esperado = LEN_E + 3 * LEN_CIFRADO
+    esperado = MSG2_SIZE
     cuadra = len(msg2) == esperado
     lineas.append("")
     lineas.append(f"  msg2 mide {len(msg2)} B")
-    lineas.append(f"  XX canónico E,EE,S,ES mide {esperado} B")
+    lineas.append(f"  E(32) + EE(0) + S(48) + ES(0) + tag(16) = {esperado} B")
     lineas.append(f"  -> {'coincide' if cuadra else 'NO coincide'}")
     if not cuadra:
-        lineas.append("")
-        lineas.append("  ⚠ El reparto de arriba es aritmética sobre XX canónico,")
-        lineas.append("    y este msg2 NO es XX canónico por tamaño. El")
-        lineas.append("    desglose por tokens **no describe el formato real**.")
-        lineas.append("")
         diferencia = len(msg2) - esperado
+        lineas.append("")
+        lineas.append("  ! El tamano no es el de XX con ChaChaPoly.")
         lineas.append(f"    diferencia: {diferencia:+d} B")
-        if diferencia < 0:
-            faltan = -diferencia
-            lineas.append(
-                f"    faltan {faltan} B. Candidatos, sin decidir cuál:"
-            )
-            lineas.append(
-                f"     - un token cifrado sin tag: 16 B menos por token "
-                f"({faltan // 16} token/s)"
-            )
-            lineas.append(
-                f"     - un token en claro en vez de cifrado: 16 B menos "
-                f"por token ({faltan // 16} token/s)"
-            )
-            if faltan % 32 != 0:
-                lineas.append(
-                    f"     - {faltan} no es múltiplo de 16 ni de 32: "
-                    f"queda algo más sin explicar"
-                )
+        lineas.append("")
+        lineas.append("    Si la diferencia es 0 y el tag Poly1305 valida al")
+        lineas.append("    leerlo, el desglose de arriba es el bueno. Si el tag")
+        lineas.append("    NO valida, el desglose es aritmetica sobre una")
+        lineas.append("    suposicion y las posiciones no son reales.")
+        lineas.append("")
+        lineas.append("    Comprobacion que no depende del tamano: los bytes")
+        lineas.append("    0..31 deben ser un punto X25519 valido (la efimera va")
+        lineas.append("    en claro). Si no lo son, el msg2 no empieza por `E`.")
+    else:
+        lineas.append("")
+        lineas.append("  Los bytes 32..63 son la estatica cifrada de la app.")
+        lineas.append("  Al leerlo con la identidad real debe salir igual al")
+        lineas.append("  TLV 0x02 de su announce. Eso es lo que prueba que la")
+        lineas.append("  cadena de derivacion coincide.")
+        lineas.append("")
+        lineas.append("  El tamano que cuadra NO demuestra el reparto. La")
+        lineas.append("  comprobacion independiente del tamano es que los bytes")
+        lineas.append("  0..31 sean un punto X25519 valido, porque la efimera")
+        lineas.append("  va en claro; y que el tag Poly1305 valide al leerlo.")
     return lineas
 
 

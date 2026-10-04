@@ -105,61 +105,88 @@ class TestLeerPaquetes(unittest.TestCase):
 
 
 class TestDesglose(unittest.TestCase):
-    """El desglose tiene que poder decir que NO cuadra."""
+    """El desglose tiene que poder decir que NO cuadra.
 
-    def test_un_msg2_de_96_no_cuadra_con_xx_canonico(self):
-        """XX canónico mide 32 + 48*3 = 176 B.
+    ## Lo que cambia el 2026-10-05
 
-        Este es el hallazgo del 2026-10-04: el `msg2` de la app son 96 B y no
-        son XX canónico por tamaño. La herramienta tiene que decirlo, no
-        esconderlo dando un desglose plausible.
-        """
+    Antes este test daba por bueno que XX canonico mide `32 + 48*3 = 176` B, y
+    que por tanto el `msg2` real de la app (96 B) "no era XX canonico". Era una
+    cuenta mala: `EE` y `ES` son `mixDH`, derivan clave y **no emiten bytes**.
+    Los tres tokens de 48 B no existen.
+
+    El desglose correcto sale del patron y del cipher:
+
+        E(32) + EE(0) + S(48) + ES(0) + tag(16) = 96
+
+    asi que el `msg2` real de la app **si** es XX con ChaChaPoly, y 96 es
+    justo lo que tiene que decir la herramienta.
+    """
+
+    def test_un_msg2_de_96_si_cuadra(self):
+        """96 B es el tamano correcto, no una excepcion."""
         lineas = "\n".join(probe.desglosar(b"\x00" * 96))
-        self.assertIn("NO coincide", lineas)
-        self.assertIn("176", lineas)
-        self.assertIn("96", lineas)
-
-    def test_un_msg2_de_176_si_cuadra(self):
-        lineas = "\n".join(probe.desglosar(b"\x00" * 176))
         self.assertIn("coincide", lineas)
         self.assertNotIn("NO coincide", lineas)
 
-    def test_indica_cuantos_faltan(self):
-        lineas = "\n".join(probe.desglosar(b"\x00" * 96))
-        self.assertIn("80", lineas)  # 176 - 96
+    def test_el_desglose_dice_los_cuatro_tokens(self):
+        texto = "\n".join(probe.desglosar(b"\x00" * 96))
+        for token in ("E ", "EE", "S ", "ES"):
+            with self.subTest(token=token):
+                self.assertIn(token, texto)
 
-    def test_propone_las_causas_de_la_diferencia(self):
-        """Los 80 B que faltan encajan con tokens sin tag o en claro, y eso
-        es lo que hay que investigar. Se **dice**, no se supone cuál es."""
-        lineas = "\n".join(probe.desglosar(b"\x00" * 96))
-        self.assertIn("tag", lineas)
-        self.assertIn("sin decidir", lineas)
+    def test_los_mixdh_son_cero_bytes(self):
+        """`EE` y `ES` no ocupan espacio. Es la mitad del error anterior."""
+        texto = "\n".join(probe.desglosar(b"\x00" * 96))
+        self.assertIn("EE  ->   0 B", texto)
+        self.assertIn("ES  ->   0 B", texto)
+
+    def test_ningun_token_mixdh_cuesta_48(self):
+        """176 y 144 fueron las dos cuentas erroneas. Ninguna puede volver."""
+        texto = "\n".join(probe.desglosar(b"\x00" * 96))
+        self.assertNotIn("176", texto)
+        self.assertNotIn("144", texto)
+
+    def test_avisa_cuando_el_tamano_no_cuadra(self):
+        lineas = "\n".join(probe.desglosar(b"\x00" * 80))
+        self.assertIn("NO coincide", lineas)
+
+    def test_indica_cuantos_faltan(self):
+        lineas = "\n".join(probe.desglosar(b"\x00" * 80))
+        self.assertIn("-16", lineas)  # 80 - 96
 
     def test_avisa_que_el_desglose_no_describe_el_formato_real(self):
-        """El fallo de este informe sería enseñar `S -> 16 B` sin avisar de que
-        el patrón no es XX, que lleva a debuggear un token que no existe."""
-        texto = " ".join(probe.desglosar(b"\x00" * 96))
-        # La frase va partida en varias líneas del informe, así que se
-        # comprueba sobre el texto unido: `assertIn` sobre el "\n" fallaría
-        # aunque el aviso esté.
-        self.assertIn("no describe el formato real", texto)
+        """El fallo de este informe seria ensenar `S -> 16 B` sin avisar de que
+        el tamano no cuadra, que lleva a debuggear un token que no existe."""
+        texto = " ".join(probe.desglosar(b"\x00" * 80))
+        # La frase va partida en varias lineas del informe, asi que se
+        # comprueba sobre el texto unido: `assertIn` sobre el "\n" fallaria
+        # aunque el aviso este.
+        self.assertIn("aritmetica sobre una", texto)
 
-    def test_no_dice_que_avisa_cuando_el_patron_si_cuadra(self):
-        """Con 176 B el desglose sí es válido: no debe llevar el aviso."""
-        texto = " ".join(probe.desglosar(b"\x00" * 176))
-        self.assertNotIn("no describe el formato real", texto)
+    def test_no_dice_que_avisa_cuando_el_tamano_si_cuadra(self):
+        """Con 96 B el desglose si es valido: no debe llevar el aviso."""
+        texto = " ".join(probe.desglosar(b"\x00" * 96))
+        self.assertNotIn("aritmetica sobre una", texto)
 
     def test_avisa_cuando_un_token_no_cabe(self):
-        """Con 96 B, `S` necesita 48 y sólo quedan 16. Se dice "NO CABE" en vez
-        de escribir 16 como si fuera el tamaño del token."""
-        texto = "\n".join(probe.desglosar(b"\x00" * 96))
+        """Con 80 B, `S` necesita 48 y solo quedan 48 tras `E`... y el tag se
+        queda sin sitio. Se dice "NO CABE" en vez de escribir un tamano que no
+        es real."""
+        texto = "\n".join(probe.desglosar(b"\x00" * 10))
         self.assertIn("NO CABE", texto)
 
     def test_no_se_inventa_bytes_que_no_hay(self):
-        """Con 10 B no puede "desglosar" 176: el informe tiene que poner lo que
-        hay, no lo que debería."""
+        """Con 10 B no puede desglosar 96: el informe tiene que poner lo que
+        hay, no lo que deberia."""
         lineas = "\n".join(probe.desglosar(b"\x00" * 10))
         self.assertIn("10", lineas)
+
+    def test_dice_que_comprobar_la_efimera(self):
+        """Un tamano que cuadra no demuestra el reparto. La comprobacion que si
+        es independiente del tamano es que los 32 primeros bytes sean un punto
+        X25519 valido, porque la efimera va en claro."""
+        texto = " ".join(probe.desglosar(b"\x00" * 96))
+        self.assertIn("punto X25519", texto)
 
 
 class TestSinNoiseProtocol(unittest.TestCase):
@@ -174,9 +201,15 @@ class TestSinNoiseProtocol(unittest.TestCase):
     """
 
     def test_desglosar_no_depende_de_la_libreria(self):
-        """El desglose es aritmética sobre longitudes: no necesita nada."""
-        lineas = probe.desglosar(bytes(96))
+        """El desglose es aritmetica sobre longitudes: no necesita nada.
+
+        Se comprueba con un tamano que **no** cuadra, porque ahi el informe
+        tiene mas trabajo que hacer: si bastara con que el tamino cuadre, el
+        test pasaria sin hacer nada.
+        """
+        lineas = probe.desglosar(bytes(80))
         self.assertTrue(any("NO coincide" in l for l in lineas))
+        self.assertTrue(any("E" in l and "32" in l for l in lineas))
 
     def test_leer_paquetes_no_depende_de_la_libreria(self):
         """Leer un paquete tampoco la necesita."""

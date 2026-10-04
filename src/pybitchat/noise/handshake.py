@@ -16,8 +16,10 @@ formato de paquete de BitChat.
 
 Tres cosas que hay que respetar:
 
-1. **`msg1` son 32 bytes.** Es `-- e, es` de Noise XX, sin carga: los
-   parámetros `null, 0, 0` son el payload vacío.
+1. **`msg1` son 32 bytes.** Es `-- e` de Noise XX y nada más. Los
+   parámetros `null, 0, 0` son el payload vacío, que **no** produce tag:
+   al escribir `msg1` aún no hay clave, y `ChaChaPolyCipherState` sale por
+   `if (!haskey)` sin escribirlo. Con clave serían 48.
 2. **`signature = null`.** La app **no** firma el handshake, y el
    `BinaryProtocol.encode` sólo añade los 64 B si `signature != null`.
 3. **El payload va sin comprimir**, pero `encode` lo comprime *si conviene*
@@ -64,7 +66,7 @@ línea 113:
 
 No hay desempate por comparación de `peer_id`: quien decide puede empezar
 cuando quiera. Eso elimina el problema de "los dos empezamos a la vez", que
-en Noise XX se resuelve con `e, es` ↔ `e, ee, se`.
+en Noise XX se resuelve con `e` — `e, ee, s, es`.
 
 ## Relleno
 
@@ -86,9 +88,23 @@ from ..protocol.identity import Identity, peer_id_from_noise_key
 from ..protocol.packet import Packet, PacketHeader, pkcs7_pad_to_bucket
 from ..protocol.types import MessageType, PacketFlags, should_pad_for_ble
 
-#: Tamaño de `msg1` en Noise XX: `-- e, es`, dos clave públicas de 32 B.
-#: `NoiseSession.kt:293` reserva `XX_MESSAGE_1_SIZE` y avisa si no cuadra.
+#: Tamaño de `msg1` en Noise XX. El patron es `-- e` y nada más.
+#:
+#: No lleva tag aunque la carga sea vacía: al escribir `msg1` todavía
+#: **no hay clave**, y `ChaChaPolyCipherState.encryptWithAd` sale por la rama
+#: `if (!haskey)` sin escribir tag. Por eso son 32 y no 48.
+#:
+#: El tamano del `msg2` y del `msg3` salen del mismo razonamiento; estan
+#: abajo como constantes porque `probe_msg2.py` necesita una predicción
+#: que pueda refutar.
 MSG1_SIZE = 32
+
+#: `msg2`, el que nos manda la app: `e`(32) + `s` cifrada(32+16) + `es`(0)
+#: + tag de carga vacía(16). Sí coincide con los 96 B capturados.
+MSG2_SIZE = 96
+
+#: `msg3`: `s` cifrada(32+16) + `se`(0) + tag(16).
+MSG3_SIZE = 64
 
 #: TTL que usa la app para el handshake (`MessageHandler.kt:393`).
 #: `MESSAGE_TTL_HOPS`, el mismo que en iOS.
@@ -103,7 +119,8 @@ def construir_msg1(
 ) -> tuple[bytes, HandshakeSession]:
     """Construye `msg1` de Noise XX. Devuelve `(mensaje, sesión)`.
 
-    `msg1` son 32 bytes y **no** lleva carga: es `-- e, es`.
+    `msg1` son 32 bytes y **no** lleva carga: es `-- e`. Sin tag, porque al
+escribirlo todavia no hay clave.
 
     ## El destinatario no es opcional
 
@@ -227,42 +244,64 @@ def iniciar_handshake(
 # aceptaba `verificar_peer_id=False` como salida, que es exactamente el caso en
 # que no verifica nada y aun así parece que sí.
 #
-# ## Lo que no se sabe
+# ## El `msg2` de 96 B: RESUELTO el 2026-10-05
 #
-# El `msg2` de la app mide **96 B**. El XX canónico del código de ella mide
-# **128 B** (`E` 32 + `EE` 48 + `S` 48 + `ES` 0, porque `ES` es un `mixDH` y no
-# ocupa espacio). El comentario de `NoiseSession.kt:32` dice 96 con
-# `(32 + 48) + 16 (MAC)`, que no corresponde a ningún patrón de los que hay en
-# `Pattern.java`.
+# Antes aqui habia tres fuentes que discrepaban. La que manda es el codigo:
 #
-# Tres fuentes discrepan y no se sabe cuál manda:
+# | Fuente | Decia | Verdad |
+# |---|---|---|
+# | `Pattern.java` + `HandshakeState` | 128 B | **144 B**: la cuenta estaba mal |
+# | comentario `NoiseSession.kt:32` | 96 B | 96 B, correcto |
+# | bytes reales | 96 B | 96 B |
 #
-# | Fuente | Dice |
-# |---|---|
-# | `Pattern.java:157` + `HandshakeState` | 128 B |
-# | comentario `NoiseSession.kt:32` | 96 B |
-# | bytes reales | 96 B |
+# Las 144 B eran un calculo mio, y estaba mal por el motivo opuesto al que
+# suponia: conte `EE` y `ES` como si ocuparan espacio. Son `mixDH`: **0 bytes**.
 #
-# ## Lo que sí se sabe, y es poco
+# ## Los tres tamanos, derivados del patron y del cipher
 #
-# - El `msg2` **se lee sin error de descifrado**: la etiqueta Poly1305 valida.
-# - Aun así no entrega clave estática.
-# - La app **sí** procesa nuestro `msg1` y responde dirigido a nuestro
-#   `peer_id`, que es lo que `empaquetar` hace bien.
+# `Pattern.java`, `noise_pattern_XX`:
 #
-# ## Por qué no se sigue
+#     0:flags  1:E  2:FLIP  3:E  4:EE  5:S  6:ES  7:FLIP  8:S  9:SE
 #
-# Escribir `msg3` sin saber el formato de `msg2` es adivinar en la única parte
-# del protocolo donde adivinar es criptográficamente grave. Y la identidad, en
-# esta variante, parece viajar en el `ANNOUNCE` y no en el handshake: la app
-# manda un announce completo después de cada handshake. Eso **no** está
-# confirmado.
+# `HandshakeState.writeMessage` termina **siempre** con:
 #
-# Cuando se sepa, la verificación de identidad se hace sobre el announce, no
-# sobre el handshake. `tools/probe_msg2.py` es la herramienta para investigar.
+#     messagePosn += symmetric.encryptAndHash(..., 0);
+#
+# pero `ChaChaPolyCipherState` solo emite tag **si ya hay clave**:
+#
+#     public int getMACLength() { return haskey ? 16 : 0; }
+#     if (!haskey) { arraycopy(...); return length; }   // sin tag
+#
+# De ahi sale todo, sin tocar un solo byte capturado:
+#
+#     msg1 = E(32) + FLIP + tag(vacio, SIN clave)       = 32   <- el nuestro
+#     msg2 = E(32) + EE(0) + S(32+16) + ES(0) + tag(16) = 96   <- el capturado
+#     msg3 = S(32+16) + SE(0) + tag(16)                 = 64
+#
+# El 96 del comentario de `NoiseSession.kt:32`, `(32 + 48) + 16 (MAC)`, es
+# exactamente `e` + `s cifrada` + `tag`. Acerto la cuenta sin tener el
+# `writeMessage` delante.
+#
+# ## Dos cosas que esto deja resueltas
+#
+# 1. **`msg1` de 32 B es correcto**, no un bug. Antes era una sospecha; ahora es
+#    una aritmetica: sin clave no hay tag. Por eso `MSG1_SIZE` se queda en 32.
+# 2. **La clave estatica del peer SI viaja en el `msg2`**, cifrada, en los bytes
+#    32..63. Antes se decia que "el `msg2` no entrega clave estatica"; eso se
+#    escribio sin `noiseprotocol` instalada en el host, asi que `read_message`
+#    nunca llego a ejecutarse sobre el `msg2` real.
+#
+# ## Lo que falta
+#
+# Ejecutar `tools/probe_msg2.py` con `noiseprotocol` instalada y comprobar que
+# `read_handshake` devuelve `remote_static_public` igual a la clave del TLV
+# `0x02` del announce de la app. Si cuadra, la cadena de derivacion coincide y
+# se puede escribir el `msg3` de 64 B con criterio en vez de a ciegas.
 
 __all__ = [
     "MSG1_SIZE",
+    "MSG2_SIZE",
+    "MSG3_SIZE",
     "TTL_HANDSHAKE",
     "construir_msg1",
     "empaquetar",

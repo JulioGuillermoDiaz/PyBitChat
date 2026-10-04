@@ -131,11 +131,12 @@ verificación de firma re-codifica el paquete, re-comprimir un payload ajeno
 
 ---
 
-## 3. Los tres problemas abiertos
+## 3. Problemas: uno resuelto, tres abiertos
 
-### 3.1 El `msg2` de 96 B no encaja con el patron que dice el codigo
+### 3.1 El `msg2` de 96 B: **RESUELTO** el 2026-10-05
 
-**Es el problema abierto que queda. Sustituye al "no llega el handshake".**
+**Este ya no es un problema abierto.** Los 96 B son los correctos y salen del
+codigo de la app. Lo que estaba mal era la cuenta.
 
 ### Lo que funciona
 
@@ -144,92 +145,70 @@ El 2026-10-04 la app **respondio** a nuestro `msg1`:
     recipient = 4baf99fa0b9298ba   <- nuestro peer_id
     payload   = 96 B, tipo 0x10
 
-Eso prueba que procesa nuestro `msg1` y contesta a quien se lo envia. Todo el
-`noise/handshake.py` que hace falta para el `msg1` **esta verificado**: la
-app lo acepta.
+Y el 2026-10-05 volvio a hacerlo. Todo el `noise/handshake.py` que hace falta
+para el `msg1` **esta verificado**: la app lo acepta.
 
-### Lo que no encaja
+### Los tres tamanos, derivados
 
-Tres fuentes discrepan y no se sabe cual manda:
+`Pattern.java`, `noise_pattern_XX`:
 
-| Fuente | Dice que `msg2` mide |
-|---|---|
-| `Pattern.java:157` + `HandshakeState` | **128 B** (`E` 32 + `EE` 48 + `S` 48 + `ES` 0) |
-| comentario `NoiseSession.kt:32` | **96 B** (`(32 + 48) + 16 (MAC)`) |
-| **bytes reales** | **96 B** |
+    0:flags 1:E 2:FLIP 3:E 4:EE 5:S 6:ES 7:FLIP 8:S 9:SE
 
-`ES` es un `mixDH` y ocupa **0 B**, no 48. Y el comentario de la app,
-`(32 + 48) + 16`, no corresponde a ningún patrón de `Pattern.java`. Los bytes
-reales (96) coinciden con el comentario, pero el código que dice "96" no produce
-96 B. Uno de los dos miente y no está claro cuál.
+`HandshakeState.writeMessage` termina **siempre** con `encryptAndHash(..., 0)`,
+pero `ChaChaPolyCipherState` solo emite tag **si ya hay clave**:
 
-### Lo que si se sabe, y es poco
+    getMACLength() = haskey ? 16 : 0
+    if (!haskey) { arraycopy(...); return length; }   // sin tag
 
-- El `msg2` **se lee sin error de descifrado**: la etiqueta Poly1305 valida.
-- Aun asi, `read_handshake` **no deja ninguna clave estatica remota**, asi que
-  no hay de que derivar un `peer_id`.
-- La app manda un **announce completo despues** de cada handshake. Las claves
-  parece que viajan ahi, no en el handshake. **No esta confirmado.**
-
-### Por que se retiro `completar_handshake`
-
-Escribia el `msg3` y verificaba `sha256(clave del msg2)[:8] == peer_id`. Como
-no hay clave, la verificacion no verificaba, y su `verificar_peer_id=False`
-debia ser justo el caso real. Es peor que no tenerla: da seguridad falsa.
-`tests/test_noise_handshake.py::TestRetiradaDeCompletarHandshake` impide que
-vuelva.
-
-Escribir un `msg3` sin saber el formato del `msg2` es adivinar en la unica parte
-del protocolo donde adivinar es criptograficamente grave.
-
-### El announce NO va antes del handshake (revertido)
-
-Se probó y **empeoró** las cosas. La comparación de las dos ejecuciones:
-
-| | Enviado | `msg2` |
+| msg | como se compone | bytes |
 |---|---|---|
-| 04-oct | handshake **solo** | ✅ 96 B |
-| 05-oct | announce **+** handshake | ❌ ninguno |
+| `msg1` | `E`(32) + tag vacio, **sin clave todavia** | **32** |
+| `msg2` | `E`(32) + `EE`(0) + `S`(32+16) + `ES`(0) + tag(16) | **96** |
+| `msg3` | `S`(32+16) + `SE`(0) + tag(16) | **64** |
 
-La hipótesis era que sin presentación previa la app no tiene un par al que
-dirigir el handshake —el móvil no mostraba ninguno—. **No se comprobó que el
-handshake ya funcionara sin announce**, y funcionaba, con dos sesiones de
-evidencia. El dato que lo refutaba estaba en este mismo documento desde el
-03-oct.
+`EE`, `ES` y `SE` son `mixDH`: derivan clave y **no emiten bytes**. Ese es el
+error entero, y va en las dos direcciones: los 176 y los 128 salian de contar
+`mixDH` como si ocuparan 48.
 
-Revertido en `2f300bb` (vuelto atrás en el commit siguiente).
+`msg1` mide 32 y no 48 porque al escribirlo **todavia no hay clave** —el
+primer `mixKey` ocurre en `EE`, dentro de `msg2`—, asi que el payload vacio no
+produce tag. Por eso `MSG1_SIZE` se queda en 32.
 
-Lo que **no** se revierte, porque sigue siendo cierto y no depende del orden:
-un announce **no** lleva `recipient_id` —eso es lo que lo hace broadcast— y el
-handshake **sí** lo lleva, que es lo que hace que la app lo acepte
-(`MessageHandler.kt:375`).
+### Las tres cuentas que se dijeron, y por que estaban mal
 
-### Como investigarlo
+| cuenta | total | error |
+|---|---|---|
+| `E` + `EE`(48) + `S`(48) + `ES`(48) | 176 | conto los `mixDH` como 48 |
+| `E`(32) + `EE`(48) + `S`(48) + `ES`(0) | 144 | conto `EE` como 48 |
+| `E`(32) + `EE`(48) + `S`(48) + `ES`(0) | **128** | le falta el tag final (16) |
 
-```bash
-./.venv/bin/python tools/probe_msg2.py
-```
+Ninguna puede volver a decir 96: eso lo comprueban los tests de
+`tests/test_tamanos_handshake.py`.
 
-Da el desglose aunque falte `noiseprotocol`. Con ella instalada, ademas prueba
-`read_handshake` con la identidad real y dice si la clave aparece.
+### Lo que faltaba, y por que no se sabia
 
-### El error de razonamiento de este tramo
+El dato de "el `msg2` no entrega clave estatica" se escribio sin
+`noiseprotocol` instalada en el host, asi que `read_message` **nunca llego a
+ejecutarse** sobre el `msg2` real. Con la libreria instalada ya se puede.
 
-Tres cifras seguidas para `msg2`: **176**, luego **96**, y el correcto **128**.
-Las tres equivocadas:
+Y la clave estatica **si viaja** en el `msg2`, cifrada, en los bytes 32..63.
 
-| Cifra | Por que fallo |
+### Lo que queda: una comprobacion, no un desarrollo
+
+    ./.venv/bin/python tools/probe_msg2.py
+
+| `remote_static_public` | Conclusion |
 |---|---|
-| 176 | contou `ES` como si ocupara 48 B |
-| 96 | **cuadra por suma, no por protocolo** |
-| 128 | no se calculo hasta el final |
+| igual al TLV `0x02` del announce | la derivacion coincide |
+| `None` o error de descifrado | el `msg2` no es XX con ChaChaPoly |
 
-El del medio es el grave: encontrar una descomposicion que encaja con los bytes
-reales y llamarla hallazgo. Es el mismo error que en el relleno PKCS#7 - un
-dato inventado que hace cuadrar una conclusion - repetido dos dias despues.
+Con la primera, la cadena de derivacion coincide y se puede escribir el
+`msg3` de 64 B con criterio. Con la segunda, el desglose de 96 B es aritmetica
+sobre una suposicion y habra que mirar otra cosa.
 
-**Una suma que cuadra no es un hallazgo.** Hay que mirar el codigo que produce
-los bytes, y comprobar que el comentario que lo explica sea del mismo commit.
+`probe_msg2.py` ya usa la cuenta correcta, y avisa de que un tamano que cuadra
+**no** demuestra el reparto. La comprobacion independiente del tamano es que
+los bytes 0..31 sean un punto X25519 valido, porque la efimera va en claro.
 
 ### 3.2 Relleno: es PKCS#7, confirmado - tras fallar dos veces
 
@@ -303,6 +282,32 @@ Además nuestro `MESSAGE` rechaza el payload de 4 bytes (`"exit"`) porque
 mínimo es demasiado estricto.**
 
 ---
+
+### 3.4 El announce NO va antes del handshake
+
+Probado el 2026-10-05 y **deshecho**. Mandar el announce antes del handshake no
+ayuda; la hipotesis de que hacia falta una presentacion previa era falsa.
+
+Lo que se vio:
+
+| | Enviado | `msg2` |
+|---|---|---|
+| 04-oct | handshake **solo** | 96 B, dos veces |
+| 05-oct, 1a vez | announce **+** handshake | ninguno |
+| 05-oct, 2a vez | announce **+** handshake | **96 B** |
+
+La primera vez que fallo, la conclusion "el announce empeora las cosas" era una
+muestra de **una**. A la segunda volvio a llegar el `msg2` con el announce
+puesto, asi que la conclusion no se sostiene: el fallo fue de sesion —movil sin
+desbloquear, mas de 15 min inactivo, el que sea— y no del orden.
+
+El orden no es lo que decide. Lo que decide es que el `msg1` lleve
+`recipient_id`, que ya lleva (`MessageHandler.kt:375-377` lo descarta en
+silencio sin el).
+
+Y esto se dejo dicho porque es el tercer fallo del mismo tipo: ir a por una
+hipotesis sin mirar lo que ya se sabia. El 04-oct el handshake **ya funcionaba
+sin announce**, con dos sesiones de evidencia, y eso estaba en este documento.
 
 ## 4. Cómo arrancar
 
@@ -538,7 +543,13 @@ objeto, firmas D-Bus, nombres de interfaz.
     para escribir; el host, para verificar. Un fallo de API puede llevar días
     escondido tras un `skipUnless` sin que nadie lo note.
 
----
+19. **Una cuenta que cuadra no es un hallazgo.** Se dio `msg2` = 176, luego 96,
+    luego 128, y **las tres estaban mal**: `EE`, `ES` y `SE` son `mixDH` y no
+    emiten bytes. El 96 era el correcto desde el principio y nadie lo derivo
+    del codigo que lo produce. **Derivar el tamano del codigo**, no de la
+    captura ni de un comentario, que tambien miente.
+    `tests/test_tamanos_handshake.py` existe para que las tres cuentas
+    erroneas no puedan volver a aparecer.
 
 ## 7. Notas de estilo
 
