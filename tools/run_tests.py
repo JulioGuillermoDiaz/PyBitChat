@@ -49,6 +49,53 @@ def discover() -> unittest.TestSuite:
     return suite
 
 
+def _informe_saltados(resultado: unittest.TestResult) -> None:
+    """Enumera **qué** se saltó y por qué, siempre.
+
+    Sin esto, un `skipped=6` en la línea de resumen no dice cuáles son. Un
+    test puede quedarse saltado durante semanas sin que nadie lo note, y
+    mientras tanto se cuenta como verde.
+
+    Ya pasó: `test_bleak_transport.py` lleva toda la clase condicionada a que
+    `bleak` esté instalado, así que en la VM de Windows no se ejecutaba **nada**
+    de ella. Un test de ahí llevaba días sin comprobar, y cuando se ejecutó por
+    fin en el host Linux falló a la primera.
+
+    Por eso se imprime siempre, y no sólo con `-v`: un salto que no se ve es un
+    hueco en la cobertura.
+
+    Se escribe en **stderr**, igual que `unittest`, para que el orden sea el
+    natural. Mandarlo a `stdout` lo ponía antes del `OK` resumen, y se leía
+    como que el informe venía antes de los tests.
+    """
+    saltados = list(getattr(resultado, "skipped", ()))
+    if not saltados:
+        return
+    out = sys.stderr
+    print(f"\n{'=' * 70}", file=out)
+    print(f"SKIPPED: {len(saltados)} test(s) NO se han ejecutado.", file=out)
+    print(
+        "Un salto es un hueco. Cada uno necesita hardware o una dependencia.",
+        file=out,
+    )
+    print("=" * 70, file=out)
+    vistos: dict[tuple[str, str], list[str]] = {}
+    for test, motivo in saltados:
+        caso = test.id()
+        try:
+            ruta = caso.split(".")[1]
+        except (IndexError, ValueError):
+            ruta = "?"
+        vistos.setdefault((ruta, motivo), []).append(caso)
+    for (ruta, motivo), casos in sorted(vistos.items()):
+        print(f"  {ruta}  ({len(casos)} test/s)", file=out)
+        print(f"    motivo: {motivo}", file=out)
+        for caso in casos[:4]:
+            print(f"      - {caso.rsplit('.', 1)[-1]}", file=out)
+        if len(casos) > 4:
+            print(f"      ... y {len(casos) - 4} más", file=out)
+
+
 def main() -> int:
     verbosidad = 2 if "-v" in sys.argv else 1
     pedir = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -65,6 +112,7 @@ def main() -> int:
 
     runner = unittest.TextTestRunner(verbosity=verbosidad, buffer=False)
     resultado = runner.run(suite)
+    _informe_saltados(resultado)
     return 0 if resultado.wasSuccessful() else 1
 
 
