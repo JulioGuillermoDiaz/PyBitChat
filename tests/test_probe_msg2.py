@@ -272,6 +272,81 @@ class TestSinNoiseProtocol(unittest.TestCase):
         self.assertIn("recibido.bin", src)
 
 
+class TestNombreDelModulo(unittest.TestCase):
+    """La distribucion se llama `noiseprotocol`; el modulo, `noise`.
+
+    ## Por que esto necesita un test
+
+    Pasó el 2026-10-05 en el host, y costó una ida y vuelta: `pip` decía
+    `Requirement already satisfied: noiseprotocol (0.3.1)` y el script decía
+    que el paquete no estaba instalado. Los dos tenían razón.
+
+    `requirements.txt` fija la **distribucion** de PyPI, que se llama
+    `noiseprotocol`. El **modulo** que instala se llama `noise`, y lo que
+    `noise/session.py` importa es `noise.noise_protocol`.
+
+    Preguntar por `find_spec("noiseprotocol")` devuelve `None` **siempre**, con
+    la distribución perfectamente instalada. Por eso el diagnosis tiene que ir
+    por el nombre del modulo.
+    """
+
+    def test_el_modulo_es_noise_no_noiseprotocol(self):
+        self.assertEqual(probe.MODULO_NOISE, "noise.noise_protocol")
+
+    def test_no_se_pregunta_por_el_nombre_de_la_distribucion(self):
+        """Si vuelve a preguntarse por `noiseprotocol`, el falso negativo vuelve."""
+        import inspect
+
+        fuente = inspect.getsource(probe._estado_noiseprotocol)
+        self.assertNotIn('find_spec("noiseprotocol")', fuente)
+        self.assertNotIn("import noiseprotocol", fuente)
+
+    def test_session_py_importa_el_mismo_modulo(self):
+        """El script y la sesion tienen que mirar lo mismo, o uno miente."""
+        import importlib
+
+        mod = importlib.import_module("pybitchat.noise.session")
+        self.assertTrue(hasattr(mod, "NoiseProtocol"))
+
+    def test_el_comando_de_comprobacion_usa_el_modulo(self):
+        """El comando que el motivo sugiere tiene que funcionar de verdad."""
+        ok, motivo = probe._estado_noiseprotocol()
+        if ok:
+            self.skipTest("noiseprotocol esta en esta maquina")
+        self.assertIn("noise.noise_protocol", motivo)
+        self.assertNotIn("import noiseprotocol;", motivo)
+
+
+class TestCompararContraLaApp(unittest.TestCase):
+    """La clave del `msg2` es de la app, así que se compara contra la app.
+
+    La versión anterior comparaba el `peer_id` derivado contra **nuestro** propio
+    `peer_id`. Eso da `False` siempre y no dice absolutely nada: es una
+    comparación que no puede salir bien ni mal.
+    """
+
+    def test_probar_read_acepta_el_peer_id_remoto(self):
+        import inspect
+
+        firma = inspect.signature(probe.probar_read)
+        self.assertIn("peer_id_remoto", firma.parameters)
+        self.assertIn("noise_remoto", firma.parameters)
+
+    def test_no_compara_contra_identidad_del_propio_peer_id(self):
+        import inspect
+
+        fuente = inspect.getsource(probe.probar_read)
+        self.assertNotIn("pid == identidad.peer_id", fuente)
+
+    def test_main_pasa_los_argumentos(self):
+        """Si `main` no los pasa, la firma nueva no sirve de nada."""
+        import inspect
+
+        fuente = inspect.getsource(probe.main)
+        self.assertIn("args.peer_id", fuente)
+        self.assertIn("args.noise_public", fuente)
+
+
 class TestEstadoDeNoiseprotocol(unittest.TestCase):
     """La comprobación tiene que distinguir tres casos, no uno.
 

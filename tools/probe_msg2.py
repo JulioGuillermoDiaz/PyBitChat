@@ -54,6 +54,17 @@ TIPO_HANDSHAKE = int(MessageType.NOISE_HANDSHAKE)
 LEN_E = 32
 LEN_CIFRADO = 48
 
+#: Distribucion de PyPI y **modulo** que instala. No son lo mismo, y el 2026-10-05
+#: costo una ida y vuelta enteras por confundirlo:
+#:
+#:   `requirements.txt`  ->  noiseprotocol>=0.3     (la distribucion)
+#:   `import`             ->  noise.noise_protocol   (el modulo)
+#:
+#: `pip` informa de la primera; `find_spec` y `import` tratan con la segunda.
+#: Preguntar por `noiseprotocol` da `None` siempre, con la distribucion
+#: perfectamente instalada.
+MODULO_NOISE = "noise.noise_protocol"
+
 #: El tag solo. `ChaChaPolyCipherState.getMACLength()` lo devuelve **si ya hay
 #: clave**: en `msg1` no la hay y el payload vacio no produce tag; en `msg2` ya
 #: la hay (el token `EE` es el primer `mixKey`) y produce 16.
@@ -93,7 +104,7 @@ def _estado_noiseprotocol() -> tuple[bool, str]:
 
     # Primero, ¿existe el paquete? Eso no lanza nada.
     try:
-        spec = importlib.util.find_spec("noiseprotocol")
+        spec = importlib.util.find_spec(MODULO_NOISE)
     except Exception as exc:
         return False, f"no se puede inspeccionar: {type(exc).__name__}: {exc}"
 
@@ -113,15 +124,15 @@ def _estado_noiseprotocol() -> tuple[bool, str]:
             "      Si `pip` dice lo contrario, casi siempre es que `pip` y "
             "`python`\n"
             "      son de sitios distintos. Compruébalo con:\n"
-            "        ./.venv/bin/python -c \"import noiseprotocol; "
-            "print(noiseprotocol.__file__)\"\n"
+            f"        ./.venv/bin/python -c \"from noise.noise_protocol "
+            f"import NoiseProtocol; print('ok')\"\n"
             "      y lee el traceback si falla. Si de verdad falta:\n"
             "        ./.venv/bin/pip install -r requirements.txt"
         )
 
     # Existe. Ahora, ¿importa?
     try:
-        import noiseprotocol  # noqa: F401
+        ruido = importlib.import_module(MODULO_NOISE)
     except ImportError as exc:
         # El paquete está pero le falta algo. El motivo importa: no es lo
         # mismo que "no instalado", y la reparación es distinta.
@@ -137,10 +148,10 @@ def _estado_noiseprotocol() -> tuple[bool, str]:
         )
 
     # Importó. `__version__` puede no existir, y no es motivo para fallar.
-    version = getattr(noiseprotocol, "__version__", None)
+    version = getattr(ruido, "__version__", None)
     if version is None:
-        return True, "instalada, sin `__version__`"
-    return True, f"instalada, versión {version}"
+        return True, f"instalada, módulo {MODULO_NOISE} sin `__version__`"
+    return True, f"instalada, módulo {MODULO_NOISE}, versión {version}"
 
 
 def _longitud_en_cable(p) -> int:
@@ -335,8 +346,25 @@ def desglosar(msg2: bytes) -> list[str]:
     return lineas
 
 
-def probar_read(msg2: bytes, identidad: Identity) -> None:
-    """Intenta leer el `msg2` con la identidad real y dice qué queda puesto."""
+def probar_read(
+    msg2: bytes,
+    identidad: Identity,
+    peer_id_remoto: bytes | None = None,
+    noise_remoto: bytes | None = None,
+) -> None:
+    """Intenta leer el `msg2` con la identidad real y dice qué queda puesto.
+
+    ## Contra quién se compara
+
+    La clave que sale de los bytes 32..63 es **de la app**, así que lo que
+    tiene que comprobar es contra **la app**. Compararla contra nuestro propio
+    `peer_id` daria siempre `False` y no diría nada: era lo que hacia la
+    versión anterior.
+
+    Por eso hace falta `--peer-id` y `--noise-public`: son los del announce de la
+    app, no los nuestros. Sin ellos el informe dice la clave y el `peer_id` que
+    deriva, pero no puede afirmar si es el esperado.
+    """
     print("\n--- read_handshake con la identidad real ---")
     ok, motivo = _estado_noiseprotocol()
     if not ok:
@@ -359,19 +387,41 @@ def probar_read(msg2: bytes, identidad: Identity) -> None:
     remoto = sesion.remote_static_public
     print(f"  remote_static_public: "
           f"{remoto.hex() if remoto else 'None'}")
-    if remoto:
-        pid = peer_id_from_noise_key(remoto)
-        print(f"  peer_id derivado:     {pid.hex()}")
-        print(f"  nuestro peer_id:     {identidad.peer_id_hex}")
-        print(f"  -> son el mismo peer: {pid == identidad.peer_id}")
-    else:
+    if not remoto:
         print()
-        print("  La clave estática remota NO quedó puesta. Eso es lo que")
-        print("  hay que explicar: el descifrado funcionó, pero el token")
-        print("  que la lleva no se aplicó, o se aplicó en otro sitio.")
-        print("  Candidatos a revisar:")
-        print("   - la versión de noiseprotocol (0.3.1) y cómo expone `rs`")
-        print("   - si `rs` sólo se rellena al hacer split()")
+        print("  La clave estática remota NO quedó puesta, y eso no debería")
+        print("  pasar: el tag Poly1305 validó y el token `S` es el único que")
+        print("  la lleva. Dos candidatos:")
+        print("   - `noiseprotocol` no expone `rs` hasta el `split()`. Se")
+        print("     comprueba el estado interno de la sesion tras el read.")
+        print("   - el `S` se descifró pero se guardó en otro sitio.")
+        return
+
+    pid = peer_id_from_noise_key(remoto)
+    print(f"  peer_id derivado de esa clave: {pid.hex()}")
+    print()
+    print("  Comparado con la app, que es lo que tiene que salir:")
+    if noise_remoto is not None:
+        igual = remoto == noise_remoto
+        print(f"    TLV 0x02 del announce  {noise_remoto.hex()}")
+        print(f"    clave descifrada       {remoto.hex()}")
+        print(f"    -> {'IGUAL' if igual else 'DISTINTA'}")
+        if not igual:
+            print()
+            print("    El descifrado funcionó pero la clave no es la suya. Eso")
+            print("    apuntaría a que el `msg2` no lleva su `S`, o a que el")
+            print("    `ck` no coincide y el tag validó por casualidad, que es")
+            print("    muy improbable.")
+            return
+    if peer_id_remoto is not None:
+        print(f"    peer_id de la app      {peer_id_remoto.hex()}")
+        print(f"    derivado de la clave   {pid.hex()}")
+        print(f"    -> {'IGUAL' if pid == peer_id_remoto else 'DISTINTO'}")
+    else:
+        print("    (pasa --peer-id y --noise-public para comparar de verdad)")
+    print()
+    print("  Si la clave sale igual al TLV 0x02, la cadena de derivación")
+    print("  coincide y se puede escribir el msg3 de 64 B con criterio.")
 
 
 def main() -> int:
@@ -383,12 +433,35 @@ def main() -> int:
         default=RAIZ / "capturas" / "recibido.bin",
         help="captura de paquetes (por defecto capturas/recibido.bin)",
     )
+    p.add_argument(
+        "--peer-id",
+        type=bytes.fromhex,
+        default=None,
+        help="peer_id de 8 B de la app, en hex. Es contra quien se compara "
+             "la clave del msg2",
+    )
+    p.add_argument(
+        "--noise-public",
+        type=bytes.fromhex,
+        default=None,
+        help="clave Noise publica de 32 B de la app, en hex: el TLV 0x02 de "
+             "su announce",
+    )
     args = p.parse_args()
+
+    if args.peer_id is not None and len(args.peer_id) != 8:
+        print("--peer-id debe ser 8 bytes en hex (16 caracteres)")
+        return 1
+    if args.noise_public is not None and len(args.noise_public) != 32:
+        print("--noise-public debe ser 32 bytes en hex (64 caracteres)")
+        return 1
 
     if not args.fichero.exists():
         print(f"no existe {args.fichero}")
         print("Se genera con:  ./.venv/bin/python tools/smoke_ble.py --handshake \\")
         print("                    --peer-id <hex> --noise-public <hex>")
+        print("Y estos mismos dos valores se le pasan a este script para que")
+        print("pueda comparar la clave del msg2 contra la de la app.")
         return 1
 
     datos = args.fichero.read_bytes()
@@ -432,7 +505,7 @@ def main() -> int:
     for linea in desglosar(msg2):
         print(linea)
 
-    probar_read(msg2, identidad)
+    probar_read(msg2, identidad, args.peer_id, args.noise_public)
     return 0
 
 

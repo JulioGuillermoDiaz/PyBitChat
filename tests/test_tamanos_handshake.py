@@ -17,6 +17,12 @@ La derivación sale de dos ficheros de la app y no de un solo byte capturado:
 
 De ahí, y sólo de ahí, salen 32, 96 y 64.
 
+La clase `TestTamanosMedidos` los **mide** además, montando un XX completo con
+los dos roles. La deducción demuestra que la cuenta está bien; la Medición
+demuestra que **nuestro motor** genera los mismos bytes que el de la app. Las dos
+cosas hacen falta: una suma correcta sobre bytes ajenos no prueba que el cifrado
+sea el nuestro.
+
 ## Lo que estos tests fijan
 
 Que los tres tamaños se siguen deduciendo del patrón, y que la suma de
@@ -149,6 +155,123 @@ class TestLosTresJuntos(unittest.TestCase):
     def test_diferencia_msg2_msg3(self):
         """La diferencia es exactamente el `e` del `msg2`: 32 B."""
         self.assertEqual(MSG2_SIZE - MSG3_SIZE, CLAVE_PUBLICA)
+
+
+class TestTamanosMedidos(unittest.TestCase):
+    """Los mismos tres numeros, **medidos** en vez de deducidos.
+
+    ## Por que medir y deducir las dos cosas
+
+    `tests/test_tamanos_handshake.py` deriva 32/96/64 del codigo de la app. Eso
+    demuestra que la cuenta esta bien, pero no que `noiseprotocol` —nuestro
+    motor— produzca esos mismos bytes.
+
+    Aqui se monta un XX completo con los dos roles de nuestro propio
+    `HandshakeSession` y se miden. Si `noiseprotocol` dejara de emitir el tag de
+    la carga vacia, o empezara a emitirlo antes de tener clave, estos numeros
+    cambiarian y el test caeria.
+
+    ## Que demuestra
+
+    Que el motor que usamos genera exactamente los 96 B que nos manda la app.
+    No que losOur tamano sea correcto: que el nuestro coincide con el suyo.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+
+        from pybitchat.noise.session import HandshakeSession
+
+        try:
+            import noise.noise_protocol  # noqa: F401
+        except Exception as exc:  # pragma: no cover - depende del entorno
+            raise unittest.SkipTest(f"el motor de Noise no importa: {exc}")
+
+        cls.HandshakeSession = HandshakeSession
+        cls._os = os
+
+    def _par(self):
+        os = self._os
+        S = self.HandshakeSession
+        return (
+            S(initiator=True, static_private=os.urandom(32)),
+            S(initiator=False, static_private=os.urandom(32)),
+        )
+
+    def _handshake(self):
+        """Devuelve los tres mensajes y las dos sesiones ya divididas."""
+        i, r = self._par()
+        m1 = i.write_handshake(b"")
+        r.read_handshake(m1)
+        m2 = r.write_handshake(b"")
+        i.read_handshake(m2)
+        m3 = i.write_handshake(b"")
+        r.read_handshake(m3)
+        return i, r, m1, m2, m3
+
+    def test_msg1_mide_32(self):
+        _i, _r, m1, _m2, _m3 = self._handshake()
+        self.assertEqual(len(m1), MSG1_SIZE)
+
+    def test_msg2_mide_96(self):
+        """El mismo tamaño que el `msg2` real de la app."""
+        _i, _r, _m1, m2, _m3 = self._handshake()
+        self.assertEqual(len(m2), MSG2_SIZE)
+
+    def test_msg3_mide_64(self):
+        _i, _r, _m1, _m2, m3 = self._handshake()
+        self.assertEqual(len(m3), MSG3_SIZE)
+
+    def test_las_huellas_coinciden(self):
+        """Si no coinciden, el `split()` dara claves distintas y nada cifrado
+        funcionara. Es la comprobacion que de verdad importa del handshake."""
+        i, r, _m1, _m2, _m3 = self._handshake()
+        self.assertEqual(i.handshake_hash, r.handshake_hash)
+
+    def test_cada_lado_aplica_la_estatica_del_otro(self):
+        """El token `S` del `msg2` se descifra y deja la clave del otro."""
+        i, r, _m1, _m2, _m3 = self._handshake()
+        self.assertIsNotNone(i.remote_static_public)
+        self.assertIsNotNone(r.remote_static_public)
+        self.assertEqual(len(i.remote_static_public), 32)
+        self.assertEqual(len(r.remote_static_public), 32)
+
+    def test_la_estatica_recibida_es_la_del_otro_y_no_la_propia(self):
+        """Lo que prueba el token `S`: llega la clave **del otro**.
+
+        Comparar con la del otro es lo que hace util el descifrado; comprobar que
+        **no** es la propia es lo que demuestra que no se hasimply exchanges.
+        """
+        i, r, _m1, _m2, _m3 = self._handshake()
+        # Lo que recibe el iniciador es la estatica del respondedor.
+        self.assertEqual(i.remote_static_public, r._state.s.public_bytes)
+        self.assertEqual(r.remote_static_public, i._state.s.public_bytes)
+        # Y ninguna se parece a su propia clave.
+        self.assertNotEqual(i.remote_static_public, i._state.s.public_bytes)
+        self.assertNotEqual(r.remote_static_public, r._state.s.public_bytes)
+
+    def test_split_de_los_dos(self):
+        """`split()` es el final del handshake y devuelve el canal de transporte.
+
+        Que no lance y que los dos lados consigan uno es lo que dice que la
+        derivacion llego hasta el final.
+        """
+        i, r, _m1, _m2, _m3 = self._handshake()
+        self.assertIsNotNone(i.split())
+        self.assertIsNotNone(r.split())
+
+    def test_el_tag_de_la_carga_vacia_solo_aparece_con_clave(self):
+        """El por que de que `msg1` no lleve tag y `msg2` sí.
+
+        `msg1` se escribe sin clave derivada: 32 B, sin tag. En `msg2` ya la hay,
+        por el `mixDH` de `EE`, y el tag de la carga vacía aparece: 16 B más.
+        Si esto cambia, los tres números de arriba dejan de ser 32/96/64.
+        """
+        i, _r = self._par()
+        solo = i.write_handshake(b"")
+        # e (32) y nada mas
+        self.assertEqual(len(solo), CLAVE_PUBLICA)
 
 
 if __name__ == "__main__":
