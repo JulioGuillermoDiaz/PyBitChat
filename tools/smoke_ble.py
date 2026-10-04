@@ -222,7 +222,7 @@ async def principal(args: argparse.Namespace) -> int:
     print(f"  conectando a {mac} (timeout {args.timeout}s)…")
     try:
         async with BleakClient(dev, timeout=args.timeout) as cliente:
-            return await _sesion(cliente, args, identidad, recibidos, al_recibir)
+            return await _sesion(cliente, args, identidad, recibidos, al_recibir, mac)
     except TimeoutError:
         print("\nTIMEOUT al conectar.")
         print()
@@ -256,7 +256,52 @@ async def principal(args: argparse.Namespace) -> int:
         raise SystemExit(2)
 
 
-async def _sesion(cliente, args, identidad, recibidos, al_recibir) -> int:
+def _preparar(args, identidad, mac):
+    """Decide qué paquete enviar e imprime de dónde sale.
+
+    Tres modos, y el handshake necesita el `peer_id` del móvil, que es **otro**
+    distinto del de la MAC por la que nos conectamos: las MAC rotan, el
+    `peer_id` no.
+    """
+    from pybitchat.noise.handshake import iniciar_handshake
+    from pybitchat.protocol.identity import Identity
+
+    if args.paquete:
+        paquete = args.paquete
+        print(f"\nreenviando bytes de {args.paquete} sin interpretarlos")
+    elif args.handshake:
+        # El `peer_id` de la app viene del announce, no de la MAC. Si el
+        # usuario lo pasa, se usa; si no, se deriva y se avisa.
+        peer_id = args.peer_id or identidad.peer_id
+        if args.peer_id is None:
+            print(
+                f"\nAVISO: sin --peer-id se usa el nuestro ({peer_id.hex()}).\n"
+                "  Si el móvil no lo tiene, descartará el paquete en silencio\n"
+                "  (MessageHandler.kt:375). Pásalo con --peer-id."
+            )
+        paquete, _sesion_noise = iniciar_handshake(
+            identidad,
+            peer_id_remoto=peer_id,
+            noise_public_remoto=args.noise_public,
+            ttl=args.ttl_handshake,
+        )
+        print(f"\nenviando NOISE_HANDSHAKE (msg1, {args.ttl_handshake} saltos)")
+        print(f"  nuestro peer_id  = {identidad.peer_id_hex}")
+        print(f"  destinatario     = {peer_id.hex()}")
+        if args.noise_public:
+            print(f"  Noise remota     = {args.noise_public.hex()}")
+    else:
+        paquete = identidad.announce_packet(ttl=3)
+        print(f"\nenviando ANNOUNCE de {args.nickname!r}")
+
+    print(f"  peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise, [:8])")
+    print(f"  clave Noise = {identidad.noise_public.hex()}")
+    print(f"  tamaño = {len(paquete)} B")
+    print(hexdump(paquete))
+    return paquete, None
+
+
+async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
     try:
         await cliente._backend._acquire_mtu()
     except Exception as exc:
@@ -271,12 +316,8 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir) -> int:
         print("  el teléfono no expone el characteristic de BitChat")
         return 1
 
-    paquete = args.paquete or identidad.announce_packet(ttl=3)
-    print(f"\nenviando ANNOUNCE de {args.nickname!r}")
-    print(f"  peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise, [:8])")
-    print(f"  clave Noise = {identidad.noise_public.hex()}")
-    print(f"  tamaño = {len(paquete)} B")
-    print(hexdump(paquete))
+    paquete, _sesion = _preparar(args, identidad, mac)
+
     limite = car.max_write_without_response_size
     if len(paquete) > limite:
         print(f"\nERROR: excede el máximo escribible ({limite} B). "
@@ -349,6 +390,17 @@ def main() -> int:
     p.add_argument("--guardar", type=Path,
                    default=RAIZ / "capturas" / "recibido.bin",
                    help="fichero donde se guardan los paquetes recibidos")
+    p.add_argument("--handshake", action="store_true",
+                   help="enviar NOISE_HANDSHAKE (msg1) en vez de ANNOUNCE")
+    p.add_argument("--peer-id", type=lambda s: bytes.fromhex(s), default=None,
+                   help="peer_id de 8 bytes de la app, en hex. Va en "
+                        "recipient_id; sin él la app descarta el paquete")
+    p.add_argument("--noise-public", type=lambda s: bytes.fromhex(s),
+                   default=None,
+                   help="clave Noise pública de 32 bytes de la app, en hex "
+                        "(TLV 0x02 de su announce)")
+    p.add_argument("--ttl-handshake", type=int, default=6,
+                   help="saltos del handshake (por defecto 6, como la app)")
     args = p.parse_args()
     if args.paquete:
         args.paquete = args.paquete.read_bytes()
