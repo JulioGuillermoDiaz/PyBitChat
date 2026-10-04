@@ -137,13 +137,30 @@ VERIFICADO el 2026-10-05. El enlace Noise **funciona** hasta el punto en que
 solo falta el ultimo mensaje:
 
     msg1  32 B  enviado. La app lo acepta y contesta
-    msg2  96 B  recibido. Poly1305 valido, `s` descifrada, coincide con el announce
-    msg3  64 B  construible con `--msg3`. **Aún no enviado contra la app**
+    msg2  96 B  recibido. Poly1305 válido, `s` descifrada, coincide con el announce
+    msg3  64 B  construido y enviado. `split()` correcto: sesión establecida
 
-La cadena de derivación coincide con la de la app, así que el `msg3` ya no es
-adivinar: `write_handshake(b"")` sobre la sesión viva produce los 64 B correctos y
-`split()` funciona. Está escrito y probado contra un handshake completo en local
-(20 tests), pero **nunca se ha enviado a la app**, porque eso no se puede simular.
+**El handshake XX completo funciona contra la app real** (2026-10-05, identidad
+`197a46bdd295303f`). Los tres mensajes, los 32/96/64 B correctos, y las claves de
+transporte derivadas en los dos lados.
+
+### Lo que eso **no** demuestra
+
+Que **nuestro** `split()` haya funcionado. Eso solo lo dice de nuestro lado: si
+nuestro `ck` estuviera mal, `split()` funcionaría igual y las claves de transporte
+serían distintas de las de la app. Desde fuera, un handshake establecido a un
+lado y no al otro **no se distinguen**: en Noise XX el tercer mensaje no tiene
+respuesta.
+
+Por eso no llegó ningún `NOISE_ENCRYPTED` (`0x11`): la app seguía mandando
+`ANNOUNCE` y `REQUEST_SYNC` en claro, que es lo normal cuando no tiene nada
+cifrado que decir. **Su silencio no es un fallo, y no es prueba de nada.**
+
+La prueba de que los dos lados están establecidos es **enviar un `0x11` propio y
+ver si la app lo descifra**. El soporte ya está: `NoiseTransportCipher.encrypt()`
+antepone el nonce de 4 B en big-endian (`NoiseSession.kt:133-143`), que es lo que
+espera la app.
+
 Ver `ESTADO.md` 3.5.
 
 ### 3.1 El `msg2` de 96 B: **RESUELTO** el 2026-10-05
@@ -287,11 +304,16 @@ Sigue sin explicar **qué** lo fija, pero la serie ya no son dos puntos sueltos.
 | 05-oct 2a | 18 B | 7 | 512 | 4 B | **sí** |
 | 05-oct 3a | 21 B | 7 | 768 | 8 B | no |
 | 05-oct 4a | 21 B | 7 | 768 | 8 B | **sí** |
+| 05-oct 5a | 22 B | 7 | **896** | 8 B | **sí** |
 
 Lo que se ve:
 
-- `m` es **256 x n**, con `n` = 1, 1.5, 2, 3. El 384 no es multiplo de 256, así
-  que quizá `m` no sea un número de paquetes sino un límite de bytes.
+- **Todos los `m` son múltiplos de 128**: 256=2x128, 384=3x128, 512=4x128,
+  768=6x128, 896=7x128. Con cinco puntos ya no es casualidad, y `m` es un número
+  de **bytes** pedidos, no de paquetes: por eso no es multiplo de 256. La serie
+  se lee como "cuánto más hay que pedir", en unidades de 128.
+- El `data` de la 5a sesión es 8 B; antes 3, 4 y 7. Crece, pero no sigue a
+  `m` de forma directa.
 - **No crece los días buenos.** 256 los días que el `msg2` llegó, 512 el
   día que llegó a medias, 768 el día que no llegó. No es una
   correlación con el éxito.
