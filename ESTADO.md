@@ -35,7 +35,7 @@ con lectura del código.
 | Firma Ed25519 de la app | ✅ preimagen deducida, valida |
 | **`msg1` Noise XX aceptado por la app** | ✅ **32 B, 6 de 9 sesiones** |
 | **`msg2` descifrado y verificado** | ✅ **Poly1305 válido, `s` = la del announce** |
-| **`msg3` construido y enviado** | ✅ **64 B, `split()` correcto** |
+| **`msg3` construido y enviado** | ✅ **64 B, `split()` correcto**, 2 veces |
 | `NOISE_ENCRYPTED` (`0x11`) | ❌ nunca enviado ni recibido |
 | Servidor GATT (la app conecta a nosotros) | ❌ no implementado |
 
@@ -105,9 +105,10 @@ con el `sender_id` **sin que nadie lo haya puesto ahí**.
 - El móvil anuncia BitChat con **2-3 MACs a la vez**, todas con el UUID de
   servicio. Se elige la de mayor RSSI **medido**; `-127` es el valor por defecto de
   bleak cuando BlueZ no mide (`scanner.py:209`), no una señal mala.
-- **La respuesta al handshake es intermitente**: 6 sesiones con `msg2`, 3 sin él.
-  Lo más probable es que la app conserve una sesión para nuestro `peer_id` en
-  un estado del que no sale; **no verificado**. Ver §3.1.
+- **La respuesta al handshake es intermitente con la identidad guardada**: 3 de 5
+  sesiones. Con identidad **nueva**, 3 de 3 a la primera. Lo más probable es que la
+  app conserve una sesión para ese `peer_id` en un estado del que no sale;
+  **no verificado**, y el mejor patrón que hay. Ver §3.1.
 
 ## 2. Los cuatro hallazgos que cambiaron el diseño
 
@@ -167,22 +168,32 @@ verificación de firma re-codifica el paquete, re-comprimir un payload ajeno
 
 ## 3. Problemas
 
-Cinco problemas. **Cuatro resueltos**, y el quinto es el trabajo que toca.
+Ocho problemas. **Cinco resueltos**, y el `0x11` es el trabajo que toca.
 
-### 3.1 ~~El handshake se ignoraba~~ → era la identidad persistida
+### 3.1 ~~El handshake se ignoraba~~ → qué la identidad persistida
 
-**Símptoma:** el `msg2` llegaba unas veces y otras no. 6 sesiones sí, 3 no, sin
-patrón en el orden de los paquetes ni en el announce previo.
+**Síntoma:** el `msg2` llegaba unas veces y otras no, sin patrón en el orden de
+los paquetes ni en el announce previo.
 
 **Hipótesis, no verificada:** `Identity.cargar_o_crear` recupera el fichero si
-existe, y el `peer_id` se deriva de la clave. Todas las sesiones usaban las mismas
-claves, así que para la app siempre era el mismo par. Si la app guarda una
-`NoiseSession` para ese `peer_id` y queda en un estado del que no sale, el
-handshake se ignoraría.
+existe, y el `peer_id` se deriva de la clave. Con la identidad guardada, para la app
+siempre es el mismo par. Si guarda una `NoiseSession` para ese `peer_id` y queda en
+un estado del que no sale, el handshake se ignoraría.
 
-**Cómo se comprueba:** alternar identidades en ejecuciones seguidas. Una muestra a
-favor no es evidencia: el 2026-10-05 el `msg2` llegó a la primera con identidad
-nueva, y no había llegado en las dos inmediatamente anteriores con la vieja.
+**El recuento que la apoya:**
+
+| Identidad | Sesiones | `msg2` |
+|---|---|---|
+| guardada, `4baf99fa0b9298ba` | 5 | **3 sí, 2 no** |
+| nueva cada vez | 3 | **3 sí, 0 no** |
+
+Tres de tres a la primera con identidad nueva; dos de cinco con la guardada. Es el
+mejor patrón que hay, y **no es una prueba**: `n=3` contra `n=5`, y no se ha
+controlado nada más. Lo que sí hace es justificar la regla de abajo.
+
+**Cómo se cierra:** más ejecuciones alternando identidad. Si con la guardada
+vuelve a fallar y con la nueva vuelve a funcionar a la primera, es que la app
+guarda estado del `peer_id` y la hipótesis es correcta.
 
 **Operativamente:** para una ejecución de prueba, **identidad nueva**:
 
@@ -294,9 +305,10 @@ ella (`MessageHandler.kt:392`).
 Queda abierto y **no importa**. Es un `MESSAGE` de la app cuyo payload son 72 bytes
 de `0xff`. No bloquea nada: el enlace funciona sin descifrarlo.
 
-### 3.8 `REQUEST_SYNC`: `m` son múltiplos de 128
+### 3.8 `REQUEST_SYNC`: `m` es un múltiplo de 128, pero **no crece**
 
-Sin explicar qué lo fija, pero el patrón ya se ve:
+**Corregido el 2026-10-05.** Se escribió que `m` "subía con cada intento", y la
+sesión siguiente lo refutó: **`m` bajó de 896 a 256**.
 
 | fecha | payload | `p` | `m` | `data` | ¿`msg2`? |
 |---|---|---|---|---|---|
@@ -310,19 +322,27 @@ Sin explicar qué lo fija, pero el patrón ya se ve:
 | 05-oct 3ª | 21 B | 7 | 768 | 8 B | no |
 | 05-oct 4ª | 21 B | 7 | 768 | 8 B | **sí** |
 | 05-oct 5ª | 22 B | 7 | **896** | 8 B | **sí** |
+| 05-oct 6ª | **16 B** | 7 | **256** | **2 B** | **sí** |
 
-- `p` = 7 en las diez, sin moverse.
-- **Todos los `m` son múltiplos de 128**: 2x, 3x, 4x, 6x, 7x. Con cinco puntos ya no
-  es casualidad. Es un número de **bytes** pedidos, no de paquetes — por eso no es
-  múltiplo de 256.
-- `data` son 3, 4, 7 u 8 bytes. No sigue a `m` de forma directa.
-- **`m` no crece los días buenos**, así que no explica la intermitencia del `msg2`.
+Lo que sí se sostiene:
 
-El campo es TLV con tipo de 1 B y longitud de 2 B en big-endian: `p` es el TLV `0x01`,
-`m` el `0x02`, y `data` el `0x03`. Lo que produce `m` y `data` está sin mirar, y es
-lo primero que habría que buscar en `MessageHandler.kt` antes de culpar al BLE.
+- `p` = 7 en las once, sin moverse.
+- **Todos los `m` son múltiplos de 128**: 2x, 3x, 4x, 6x, 7x. Once puntos, y con
+  384 y 896 ya no hay forma de que sea casualidad. Es un número de **bytes**,
+  no de paquetes — por eso no es múltiplo de 256.
+- **`m` no es monotónico**: subió hasta 896 y volvió a 256. Y `data` bajó de
+  8 a 2 B. Así que **no** es un contador acumulado. Lo que lo fija sigue sin
+  mirar, y no se sabe qué reinicia.
 
---- 
+El formato sí está claro: TLV con tipo de 1 B y longitud de 2 B en big-endian.
+`p` es el TLV `0x01`, `m` el `0x02`, y `data` el `0x03`. Comprobado con el payload
+de la 6ª sesión, `01 0001 07 020004 00000100 030002 7a1c`: `p`=7, `m`=256, y
+`data` de 2 B.
+
+Lo que produce `m` y `data` está sin mirar, y es lo primero que habría que buscar
+en `MessageHandler.kt` antes de culpar al BLE.
+
+---
 
 ## 4. Cómo arrancar
 
