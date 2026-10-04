@@ -280,9 +280,9 @@ def _preparar(args, identidad, mac):
                 "  Si el móvil no lo tiene, descartará el paquete en silencio\n"
                 "  (MessageHandler.kt:375). Pásalo con --peer-id."
             )
-        # La sesión **se devuelve**: sin ella no hay quien procese el `msg2`, y
-        # `completar_handshake` fallaría con un `NoneType` que no señala el
-        # origen.
+        # La sesión **se devuelve** aunque ya no se use para responder. Devolverla
+        # evita que un día alguien añada un segundo camino y reintroduzca el
+        # `None` que antes provocaba un error sin origen.
         paquete, sesion = iniciar_handshake(
             identidad,
             peer_id_remoto=peer_id,
@@ -305,79 +305,52 @@ def _preparar(args, identidad, mac):
     return paquete, sesion
 
 
-async def _escuchar_handshake(
-    cliente, car, args, identidad, recibidos, limite, sesion
-) -> int:
-    """Escucha el `msg2` de la app y le responde con `msg3`.
+async def _escuchar_handshake(cliente, car, args, identidad, recibidos) -> int:
+    """Escucha la respuesta de la app a nuestro `msg1`.
 
-    XX son tres mensajes: `-> e`, `<- e, ee, s`, `-> se`. Nosotros mandamos el
-    primero antes de entrar aquí; esta función es la que cierra el patrón.
+    ## No responde. Es deliberado.
 
-    Lo que se busca y por qué cada cosa importa:
+    Antes esta función escribía el `msg3` con `completar_handshake()`, que
+    además verificaba el `peer_id`. Se retiró esa función el 2026-10-04: la
+    verificación **no se sostenía**, porque el `msg2` real de la app no deja
+    ninguna clave estática de la que derivar el `peer_id`.
+
+    Escribir un `msg3` sin saber el formato del `msg2` sería adivinar en la
+    única parte del protocolo donde adivinar es criptográficamente grave. Aquí
+    sólo se registra lo que llega.
+
+    Lo que sí está verificado:
 
     | Lo que llega | Significa |
     |---|---|
     | `NOISE_HANDSHAKE` de 96 B | la app procesó nuestro `msg1` |
-    | `NOISE_ENCRYPTED` (`0x11`) | **el handshake ya está cerrado** |
+    | `NOISE_ENCRYPTED` (`0x11`) | la sesión está cifrada |
 
-    La respuesta va con el **mismo tipo** `0x10`, no con uno de respuesta:
-    "Single handshake type (0x10) with response determined by payload analysis"
-    (`MessageHandler.kt:364`).
+    Para investigar el `msg2`: `tools/probe_msg2.py`.
     """
-    from pybitchat.noise.handshake import completar_handshake
+    print(f"\nescuchando la respuesta hasta {args.segundos} s…")
+    await asyncio.sleep(args.segundos)
 
-    print(f"\nescuchando msg2 hasta {args.segundos} s…")
-    limite_ms = args.segundos * 1000
-    waited = 0.0
-    paso = 0.25
-    procesado = False
-
-    while waited < limite_ms and not procesado:
-        await asyncio.sleep(paso)
-        waited += paso * 1000
-        for datos in list(recibidos):
-            paquete = _primero_inesperado(datos)
-            if paquete is None:
-                continue
-            if paquete.header.raw_type != 0x10:
-                continue
-
-            print(f"\n  msg2 recibido: {len(paquete.payload)} B")
-            try:
-                msg3_paquete, sesion = completar_handshake(
-                    sesion,
-                    identidad,
-                    paquete.payload,
-                    bytes.fromhex(args.peer_id_hex),
-                )
-            except Exception as exc:
-                print(f"  NO se pudo completar el handshake: "
-                      f"{type(exc).__name__}: {exc}")
-                return 1
-
-            print("  clave estática verificada contra el peer_id esperado")
-            print(f"  msg3 = {len(msg3_paquete)} B")
-            if len(msg3_paquete) > limite:
-                print(f"  ERROR: msg3 excede el máximo escribible ({limite} B)")
-                return 1
-            await cliente.write_gatt_char(car, msg3_paquete, response=False)
-            print("  msg3 enviado. handshake cerrado.")
-            print(f"  handshake_hash = {sesion.handshake_hash.hex()}")
-            procesado = True
-            break
-
-    if not procesado:
-        print(f"\nNo llegó msg2 en {args.segundos:g} s.")
-        print("  Causas, en orden de probabilidad:")
+    vistos = 0
+    for datos in list(recibidos):
+        paquete = _primero_inesperado(datos)
+        if paquete is None:
+            continue
+        vistos += 1
+        if paquete.header.raw_type == 0x10:
+            print(f"\n  respuesta de la app: NOISE_HANDSHAKE de "
+                  f"{len(paquete.payload)} B")
+            print(f"    payload = {paquete.payload.hex()}")
+            print()
+            print("    El `msg3` NO se envía: falta por saber el formato del")
+            print("    `msg2` (ver tools/probe_msg2.py). Se responds con el")
+            print("    formato de XX canónico a ciegas.")
+    if vistos == 0:
+        print("\n  no llegó nada. Causas, en orden:")
         print("   - Sin --peer-id el paquete se descartó en silencio.")
         print("   - La app no nos ha descubierto todavía.")
         print("   - El móvil lleva >15 min sin actividad y no anuncia.")
 
-    print(f"\nescuchando {args.segundos} s más a ver si llega tráfico cifrado…")
-    await asyncio.sleep(args.segundos)
-
-    # Se guardan también los paquetes del handshake: el `msg2` de la app es la
-    # evidencia del último paso, y reenviarlo cuesta un viaje al host.
     destino = args.guardar
     _guardar(recibidos, destino)
     print(f"  {len(recibidos)} paquete(s) guardados en {destino} "
@@ -426,9 +399,7 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
     print("  enviado")
 
     if args.handshake:
-        return await _escuchar_handshake(
-            cliente, car, args, identidad, recibidos, limite, sesion
-        )
+        return await _escuchar_handshake(cliente, car, args, identidad, recibidos)
 
     print(f"\nescuchando {args.segundos} s…")
     await asyncio.sleep(args.segundos)
@@ -554,9 +525,7 @@ def main() -> int:
     p.add_argument("--ttl-handshake", type=int, default=6,
                    help="saltos del handshake (por defecto 6, como la app)")
     args = p.parse_args()
-    # En hexadecimal, para poder pasarlo a `completar_handshake` y comparar
-    # con el `peer_id` derivado. Duplicarlo aquí evita arrastrar el `bytes` por
-    # tres funciones.
+    # En hexadecimal, para los informes y para comparar con el `peer_id` derivado.
     args.peer_id_hex = args.peer_id.hex() if args.peer_id else None
     if args.paquete:
         args.paquete = args.paquete.read_bytes()

@@ -133,14 +133,81 @@ verificación de firma re-codifica el paquete, re-comprimir un payload ajeno
 
 ## 3. Los tres problemas abiertos
 
-### 3.1 No llega el handshake Noise
+### 3.1 El `msg2` de 96 B no encaja con el patron que dice el codigo
 
-Mandamos identidad válida y la app responde con su announce y un paquete de
-relleno, pero **ningún `NOISE_HANDSHAKE` (0x10)**.
+**Es el problema abierto que queda. Sustituye al "no llega el handshake".**
 
-**Hipótesis principal:** nos faltaba el anuncio. Se acaba de implementar
-(`ble/advertiser.py`). Si ahora sí lo anuncia y sigue sin handshake, el motivo
-será otro y habrá que Investigarlo.
+### Lo que funciona
+
+El 2026-10-04 la app **respondio** a nuestro `msg1`:
+
+    recipient = 4baf99fa0b9298ba   <- nuestro peer_id
+    payload   = 96 B, tipo 0x10
+
+Eso prueba que procesa nuestro `msg1` y contesta a quien se lo envia. Todo el
+`noise/handshake.py` que hace falta para el `msg1` **esta verificado**: la
+app lo acepta.
+
+### Lo que no encaja
+
+Tres fuentes discrepan y no se sabe cual manda:
+
+| Fuente | Dice que `msg2` mide |
+|---|---|
+| `Pattern.java:157` + `HandshakeState` | **128 B** (`E` 32 + `EE` 48 + `S` 48 + `ES` 0) |
+| comentario `NoiseSession.kt:32` | **96 B** (`(32 + 48) + 16 (MAC)`) |
+| **bytes reales** | **96 B** |
+
+`ES` es un `mixDH` y ocupa **0 B**, no 48. Y el comentario de la app,
+`(32 + 48) + 16`, no corresponde a ningún patrón de `Pattern.java`. Los bytes
+reales (96) coinciden con el comentario, pero el código que dice "96" no produce
+96 B. Uno de los dos miente y no está claro cuál.
+
+### Lo que si se sabe, y es poco
+
+- El `msg2` **se lee sin error de descifrado**: la etiqueta Poly1305 valida.
+- Aun asi, `read_handshake` **no deja ninguna clave estatica remota**, asi que
+  no hay de que derivar un `peer_id`.
+- La app manda un **announce completo despues** de cada handshake. Las claves
+  parece que viajan ahi, no en el handshake. **No esta confirmado.**
+
+### Por que se retiro `completar_handshake`
+
+Escribia el `msg3` y verificaba `sha256(clave del msg2)[:8] == peer_id`. Como
+no hay clave, la verificacion no verificaba, y su `verificar_peer_id=False`
+debia ser justo el caso real. Es peor que no tenerla: da seguridad falsa.
+`tests/test_noise_handshake.py::TestRetiradaDeCompletarHandshake` impide que
+vuelva.
+
+Escribir un `msg3` sin saber el formato del `msg2` es adivinar en la unica parte
+del protocolo donde adivinar es criptograficamente grave.
+
+### Como investigarlo
+
+```bash
+./.venv/bin/python tools/probe_msg2.py
+```
+
+Da el desglose aunque falte `noiseprotocol`. Con ella instalada, ademas prueba
+`read_handshake` con la identidad real y dice si la clave aparece.
+
+### El error de razonamiento de este tramo
+
+Tres cifras seguidas para `msg2`: **176**, luego **96**, y el correcto **128**.
+Las tres equivocadas:
+
+| Cifra | Por que fallo |
+|---|---|
+| 176 | contou `ES` como si ocupara 48 B |
+| 96 | **cuadra por suma, no por protocolo** |
+| 128 | no se calculo hasta el final |
+
+El del medio es el grave: encontrar una descomposicion que encaja con los bytes
+reales y llamarla hallazgo. Es el mismo error que en el relleno PKCS#7 - un
+dato inventado que hace cuadrar una conclusion - repetido dos dias despues.
+
+**Una suma que cuadra no es un hallazgo.** Hay que mirar el codigo que produce
+los bytes, y comprobar que el comentario que lo explica sea del mismo commit.
 
 ### 3.2 Relleno: es PKCS#7, confirmado - tras fallar dos veces
 
