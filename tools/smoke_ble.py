@@ -266,6 +266,11 @@ def _preparar(args, identidad, mac):
     from pybitchat.noise.handshake import iniciar_handshake
 
     sesion = None
+    paquete = None
+    #: Paquete de presentación, cuando toca mandar announce y handshake juntos.
+    #: Va antes porque la app necesita saber quiénes somos antes de que le
+    #: llegue un handshake: sin announcement no hay par al que dirigirlo.
+    presentacion = None
 
     if args.paquete:
         paquete = args.paquete
@@ -289,20 +294,32 @@ def _preparar(args, identidad, mac):
             noise_public_remoto=args.noise_public,
             ttl=args.ttl_handshake,
         )
-        print(f"\nenviando NOISE_HANDSHAKE (msg1, {args.ttl_handshake} saltos)")
-        print(f"  nuestro peer_id  = {identidad.peer_id_hex}")
-        print(f"  destinatario     = {peer_id.hex()}")
+        presentacion = identidad.announce_packet(ttl=3)
+        print(f"\n1) ANNOUNCE de {args.nickname!r} — presentación")
+        print(f"   peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise)")
+        print(f"   tamaño  = {len(presentacion)} B")
+        print(hexdump(presentacion))
+
+        print(f"\n2) NOISE_HANDSHAKE (msg1, {args.ttl_handshake} saltos)")
+        print(f"   nuestro peer_id  = {identidad.peer_id_hex}")
+        print(f"   destinatario     = {peer_id.hex()}")
         if args.noise_public:
-            print(f"  Noise remota     = {args.noise_public.hex()}")
+            print(f"   Noise remota     = {args.noise_public.hex()}")
+        print(f"   tamaño  = {len(paquete)} B")
+        print(hexdump(paquete))
     else:
         paquete = identidad.announce_packet(ttl=3)
         print(f"\nenviando ANNOUNCE de {args.nickname!r}")
+
+    if args.handshake:
+        print(f"  clave Noise = {identidad.noise_public.hex()}")
+        return paquete, sesion, presentacion
 
     print(f"  peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise, [:8])")
     print(f"  clave Noise = {identidad.noise_public.hex()}")
     print(f"  tamaño = {len(paquete)} B")
     print(hexdump(paquete))
-    return paquete, sesion
+    return paquete, sesion, None
 
 
 async def _escuchar_handshake(cliente, car, args, identidad, recibidos) -> int:
@@ -388,15 +405,27 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
         print("  el teléfono no expone el characteristic de BitChat")
         return 1
 
-    paquete, sesion = _preparar(args, identidad, mac)
+    paquete, sesion, presentacion = _preparar(args, identidad, mac)
 
     limite = car.max_write_without_response_size
-    if len(paquete) > limite:
-        print(f"\nERROR: excede el máximo escribible ({limite} B). "
-              f"MTU no negociado bien.")
-        return 1
+    for nombre, cand in (("announce", presentacion), ("handshake", paquete)):
+        if cand is not None and len(cand) > limite:
+            print(f"\nERROR: {nombre} excede el máximo escribible ({limite} B). "
+                  f"MTU no negociado bien.")
+            return 1
+
+    # El announce va **primero**: sin él la app no sabe quiénes somos y el
+    # handshake llega a un sitio donde no hay par al que dirigirlo. La pausa
+    # existe para que lo procese; mandarlos seguidos es indistinguishable de
+    # mandarlos en orden inverso.
+    if presentacion is not None:
+        await cliente.write_gatt_char(car, presentacion, response=False)
+        print(f"  announce enviado ({len(presentacion)} B)")
+        print(f"  esperando {args.pausa:g} s a que la app lo procese…")
+        await asyncio.sleep(args.pausa)
+
     await cliente.write_gatt_char(car, paquete, response=False)
-    print("  enviado")
+    print(f"  enviado ({len(paquete)} B)")
 
     if args.handshake:
         return await _escuchar_handshake(cliente, car, args, identidad, recibidos)
@@ -524,6 +553,10 @@ def main() -> int:
                         "(TLV 0x02 de su announce)")
     p.add_argument("--ttl-handshake", type=int, default=6,
                    help="saltos del handshake (por defecto 6, como la app)")
+    p.add_argument("--pausa", type=float, default=2.0,
+                   help="segundos entre el announce y el handshake (por "
+                        "defecto 2). Sin pausa, la app puede procesar el "
+                        "handshake sin haber visto el announce")
     args = p.parse_args()
     # En hexadecimal, para los informes y para comparar con el `peer_id` derivado.
     args.peer_id_hex = args.peer_id.hex() if args.peer_id else None
