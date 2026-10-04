@@ -350,14 +350,14 @@ def _leer_msg2(msg2: bytes, sesion, args) -> None:
     print("  --- leyendo el msg2 con la sesión viva ---")
     if sesion is None:
         print("    no hay sesión: el handshake se mandó sin ella.")
-        return
+        return {"estado": "sin-sesion", "msg3": None}
     try:
         carga = sesion.read_handshake(msg2, payload_size=0)
     except Exception as exc:
         print(f"    ERROR al leer: {type(exc).__name__}: {exc}")
         print("    El Poly1305 no validó. O el `ck` derivado de nuestro `msg1`")
         print("    no es el que la app usó, o el `msg2` no es XX con ChaChaPoly.")
-        return
+        return {"estado": "error", "msg3": None}
 
     if carga:
         print(f"    carga útil: {len(carga)} B")
@@ -370,7 +370,7 @@ def _leer_msg2(msg2: bytes, sesion, args) -> None:
             print("    64 = 96 - 32: solo se ha comido el token `E`. Pasa cuando")
             print("    el `msg1` no se escribió, y el `msg1` sí se escribió.")
             print("    Es un bug de quien llama, no del protocolo.")
-        return
+        return {"estado": "payload", "msg3": None}
 
     remoto = sesion.remote_static_public
     print("    leído. carga útil: 0 B  <- lo esperado")
@@ -379,13 +379,13 @@ def _leer_msg2(msg2: bytes, sesion, args) -> None:
         print()
         print("    El tag validó pero la clave estática no quedó puesta. Con el")
         print("    token `S` presente no debería pasar.")
-        return
+        return {"estado": "sin-estatica", "msg3": None}
 
     esperado = args.noise_public
     print()
     if esperado is None:
         print("    Pasa --noise-public para compararla con la de la app.")
-        return
+        return {"estado": "sin-comparar", "msg3": None}
     igual = remoto == esperado
     print(f"    TLV 0x02 del announce  {esperado.hex()}")
     print(f"    clave del msg2         {remoto.hex()}")
@@ -395,7 +395,7 @@ def _leer_msg2(msg2: bytes, sesion, args) -> None:
         print("    El tag validó y la clave no es la suya. Habría que mirar si")
         print("    el `msg2` trae otro token, o si la app usa una clave estática")
         print("    distinta para el handshake que para el announce.")
-        return
+        return {"estado": "distinta", "msg3": None}
 
     pid = peer_id_from_noise_key(remoto)
     print(f"    peer_id derivado:      {pid.hex()}")
@@ -403,8 +403,97 @@ def _leer_msg2(msg2: bytes, sesion, args) -> None:
         print(f"    peer_id de la app:      {args.peer_id.hex()}")
         print(f"    -> {'IGUAL' if pid == args.peer_id else 'DISTINTO'}")
     print()
-    print("    La cadena de derivación coincide con la de la app. El `msg3` se")
-    print("    puede escribir con criterio, sin adivinar.")
+    print("    La cadena de derivación coincide con la de la app.")
+    return {"estado": "igual", "estatica": remoto, "peer_id": pid, "msg3": None}
+
+
+def construir_msg3(sesion, resultado, args) -> bytes | None:
+    """Construye el `msg3` si toca, o devuelve `None` y explica por qué no.
+
+    ## Las dos condiciones, y las dos hacen falta
+
+    1. **`--msg3`** está puesto. Sin el flag nada cambia en las ejecuciones que
+       se usan para otra cosa.
+    2. **La lectura dio `IGUAL`.** Es la que dice que el `ck` de la sesión es el
+       de la app. Si el Poly1305 no validó, enviar un `msg3` sería ruido con
+       la forma correcta.
+
+    El segundo caso es el que de verdad protege. Un `msg3` con bytes plausibles y
+    una derivación equivocada es peor que no enviar nada: en el protocolo, desde
+    fuera, un mensaje mal derivado y uno ausente pueden ser la misma cosa, y no
+    tenemos forma de distinguirlos sin adivinar.
+
+    ## Lo que produce
+
+    `write_handshake(b"")` sobre la sesión viva: 64 B, `s` cifrada + `se` + el tag
+    de la carga vacía. Sale de `noiseprotocol`, no de código nuestro, y con el
+    estado verificado es el que la app espera.
+    """
+    from pybitchat.noise.handshake import MSG3_SIZE
+
+    if not getattr(args, "msg3", False):
+        print("  `msg3` no construido: falta --msg3.")
+        return None
+    if resultado.get("estado") != "igual":
+        print(f"  `msg3` NO enviado: la lectura dio "
+              f"{resultado.get('estado')!r}, no 'igual'.")
+        print("  Con una derivación que no cuadra, enviarlo sería ruido con la")
+        print("  forma correcta. Es el caso que este flag protege.")
+        return None
+    if sesion is None:
+        print("  `msg3` NO enviado: no hay sesión viva.")
+        return None
+
+    try:
+        mensaje = sesion.write_handshake(b"")
+    except Exception as exc:
+        print(f"  `msg3` NO se pudo construir: {type(exc).__name__}: {exc}")
+        return None
+
+    if len(mensaje) != MSG3_SIZE:
+        # No se envía un tamaño que no es el del protocolo, ni a modo de prueba.
+        print(f"  `msg3` NO enviado: mide {len(mensaje)} B y el perfil da "
+              f"{MSG3_SIZE}.")
+        return None
+
+    print(f"  `msg3` construido: {len(mensaje)} B  (s cifrada + se + tag)")
+    try:
+        cifrador = sesion.split()
+    except Exception as exc:
+        print(f"  split() falló: {type(exc).__name__}: {exc}")
+        return mensaje
+    print(f"  split() correcto: la sesión está establecida. Canal de "
+          f"transporte disponible.")
+    print(f"  {cifrador!r}")
+    return mensaje
+
+
+async def _enviar_msg3(cliente, car, args, identidad, sesion, resultado) -> bool:
+    """Construye y envía el `msg3`. Devuelve si se ha enviado algo."""
+    from pybitchat.noise.handshake import empaquetar
+
+    print("\n  --- el msg3 ---")
+    mensaje = construir_msg3(sesion, resultado, args)
+    if mensaje is None:
+        return False
+
+    if args.peer_id is None:
+        print("  NO enviado: sin --peer-id la app lo descarta en silencio")
+        print("  (`MessageHandler.kt:375-377`).")
+        return False
+
+    paquete = empaquetar(mensaje, identidad, args.peer_id, ttl=args.ttl_handshake)
+    limite = car.max_write_without_response_size
+    if len(paquete) > limite:
+        print(f"  NO enviado: {len(paquete)} B excede el máximo escribible "
+              f"({limite} B).")
+        return False
+
+    print(f"  empaquetado: {len(paquete)} B, tipo 0x10, dirigido a "
+          f"{args.peer_id.hex()}")
+    await cliente.write_gatt_char(car, paquete, response=False)
+    print("  ENVIADO")
+    return True
 
 
 async def _escuchar_handshake(
@@ -440,16 +529,45 @@ async def _escuchar_handshake(
     await asyncio.sleep(args.segundos)
 
     vistos = 0
+    resultado = None
+    enviados_msg3 = False
     for datos in list(recibidos):
         paquete = _primero_inesperado(datos)
         if paquete is None:
             continue
         vistos += 1
-        if paquete.header.raw_type == 0x10:
+        if paquete.header.raw_type == 0x10 and resultado is None:
             print(f"\n  respuesta de la app: NOISE_HANDSHAKE de "
                   f"{len(paquete.payload)} B")
             print(f"    payload = {paquete.payload.hex()}")
-            _leer_msg2(paquete.payload, sesion, args)
+            resultado = _leer_msg2(paquete.payload, sesion, args)
+            if await _enviar_msg3(
+                cliente, car, args, identidad, sesion, resultado
+            ):
+                enviados_msg3 = True
+    if enviados_msg3:
+        print(f"\nescuchando {args.segundos} s más, por si la app contesta...")
+        antes = len(recibidos)
+        await asyncio.sleep(args.segundos)
+        nuevos = 0
+        for datos in list(recibidos)[antes:]:
+            paquete = _primero_inesperado(datos)
+            if paquete is None:
+                continue
+            nuevos += 1
+            nombre = (
+                MessageType(paquete.header.raw_type).name
+                if paquete.header.raw_type in MessageType._value2member_map_
+                else "?"
+            )
+            print(f"  {nombre} (0x{paquete.header.raw_type:02x}) de "
+                  f"{len(paquete.payload)} B")
+        if nuevos == 0:
+            print("  nada nuevo. El `msg3` se ha enviado y no hay respuesta:")
+            print("  eso NO significa que esté mal. El handshake establishment")
+            print("  no tiene respuesta propia en Noise; lo que llega después son")
+            print("  mensajes ya cifrados con la clave de transporte.")
+
     if vistos == 0:
         print("\n  no llegó nada. Causas, en orden:")
         print("   - Sin --peer-id el paquete se descartó en silencio.")
@@ -618,6 +736,9 @@ def main() -> int:
     p.add_argument("--guardar", type=Path,
                    default=RAIZ / "capturas" / "recibido.bin",
                    help="fichero donde se guardan los paquetes recibidos")
+    p.add_argument("--msg3", action="store_true",
+                   help="envía el `msg3` (64 B) si la lectura del `msg2` dio "
+                        "IGUAL. Implica --handshake")
     p.add_argument("--handshake", action="store_true",
                    help="enviar NOISE_HANDSHAKE (msg1) en vez de ANNOUNCE")
     p.add_argument("--peer-id", type=lambda s: _hex(s, 8), default=None,
@@ -630,6 +751,12 @@ def main() -> int:
     p.add_argument("--ttl-handshake", type=int, default=6,
                    help="saltos del handshake (por defecto 6, como la app)")
     args = p.parse_args()
+    # `--msg3` sin `--handshake` no tendr{i}a ninguna sesi{o}n que completar:
+    # el `msg3` es la respuesta a un `msg2`, y el `msg2` solo se pide al mandar
+    # el `msg1`. Se activa el handshake en vez de fallar con un error seco, porque
+    # el usuario ya ha pedido lo que quiere.
+    if args.msg3:
+        args.handshake = True
     # En hexadecimal, para los informes y para comparar con el `peer_id` derivado.
     args.peer_id_hex = args.peer_id.hex() if args.peer_id else None
     if args.paquete:

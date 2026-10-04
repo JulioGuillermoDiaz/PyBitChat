@@ -138,11 +138,13 @@ solo falta el ultimo mensaje:
 
     msg1  32 B  enviado. La app lo acepta y contesta
     msg2  96 B  recibido. Poly1305 valido, `s` descifrada, coincide con el announce
-    msg3  64 B  NO enviado
+    msg3  64 B  construible con `--msg3`. **Aún no enviado contra la app**
 
-La cadena de derivacion coincide con la de la app, asi que el `msg3` ya no seria
-adivinar: `write_handshake(b"")` sobre la sesion viva produce los 64 B correctos.
-**No esta hecho, y no se hace sin decision del usuario.** Ver `ESTADO.md` 3.5.
+La cadena de derivación coincide con la de la app, así que el `msg3` ya no es
+adivinar: `write_handshake(b"")` sobre la sesión viva produce los 64 B correctos y
+`split()` funciona. Está escrito y probado contra un handshake completo en local
+(20 tests), pero **nunca se ha enviado a la app**, porque eso no se puede simular.
+Ver `ESTADO.md` 3.5.
 
 ### 3.1 El `msg2` de 96 B: **RESUELTO** el 2026-10-05
 
@@ -397,11 +399,30 @@ Eso dice tres cosas a la vez:
 3. **La identidad queda autenticada.** La clave descifrada deriva al `peer_id` de
    la app, que es el que esperáamos.
 
-### Lo que queda: enviar el `msg3` de 64 B
+### El `msg3`: escrito, con dos guardas
 
-Y ya no sería adivinar. Con la cadena verificada, el estado de la sesión es
-exactamente el que la app tiene, y `write_handshake(b"")` produce los 64 B
-correctos. **No está hecho**, y no se hace sin decisión.
+Decidió el usuario. Vive en `construir_msg3()`, y tiene dos condiciones:
+
+1. **`--msg3`** está puesto. Sin el flag, las ejecuciones que se usan para otra
+   cosa no cambian.
+2. **La lectura dio `IGUAL`.**
+
+La segunda es la que protege de verdad. Un `msg3` con bytes plausibles y una
+derivación equivocada es **peor que no enviarlo**: desde fuera, un mensaje mal
+derivado y uno ausente pueden ser lo mismo, y no hay forma de distinguirlos sin
+adivinar. Un `msg3` con la `s` correcta por casualidad no se distingue de uno
+bien derivado.
+
+Hay un tercer filtro: si no mide 64 B, no se envía. Tampoco a modo de prueba.
+
+Va en otro paquete `NOISE_HANDSHAKE` (`0x10`), que es el mismo tipo que usa la
+app para el `msg1` y el `msg2`, y **con `recipient_id`**: sin él lo descarta en
+silencio (`MessageHandler.kt:375-377`).
+
+**Lo que no se hace todavía:** descifrar nada de lo que llegue después
+(`NOISE_ENCRYPTED`, `0x11`). El handshake completo no tiene respuesta propia en
+Noise: lo que llega después ya va cifrado con la clave de transporte, y eso es
+otro paso con otra decisión. Aquí solo se registra qué tipos llegan.
 
 ### Cómo fue la causa
 
