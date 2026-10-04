@@ -264,7 +264,8 @@ def _preparar(args, identidad, mac):
     `peer_id` no.
     """
     from pybitchat.noise.handshake import iniciar_handshake
-    from pybitchat.protocol.identity import Identity
+
+    sesion = None
 
     if args.paquete:
         paquete = args.paquete
@@ -279,7 +280,10 @@ def _preparar(args, identidad, mac):
                 "  Si el móvil no lo tiene, descartará el paquete en silencio\n"
                 "  (MessageHandler.kt:375). Pásalo con --peer-id."
             )
-        paquete, _sesion_noise = iniciar_handshake(
+        # La sesión **se devuelve**: sin ella no hay quien procese el `msg2`, y
+        # `completar_handshake` fallaría con un `NoneType` que no señala el
+        # origen.
+        paquete, sesion = iniciar_handshake(
             identidad,
             peer_id_remoto=peer_id,
             noise_public_remoto=args.noise_public,
@@ -298,7 +302,7 @@ def _preparar(args, identidad, mac):
     print(f"  clave Noise = {identidad.noise_public.hex()}")
     print(f"  tamaño = {len(paquete)} B")
     print(hexdump(paquete))
-    return paquete, None
+    return paquete, sesion
 
 
 async def _escuchar_handshake(

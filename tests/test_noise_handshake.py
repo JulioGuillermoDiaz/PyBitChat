@@ -578,6 +578,40 @@ class TestSmokeBle(unittest.TestCase):
         self.assertIn("AVISO", salida)
         self.assertIn("MessageHandler.kt:375", salida)
 
+    def test_con_handshake_devuelve_la_sesion(self):
+        """Sin sesión no hay quien procese el `msg2`.
+
+        El fallo real: `_preparar` creaba la sesión y devolvía `None`, y
+        `completar_handshake` reventaba con
+
+            AttributeError: 'NoneType' object has no attribute 'read_handshake'
+
+        que no señala que el problema está dos funciones más arriba, en el
+        retorno. El mensaje señalaba el síntoma, no la causa.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _paquete, sesion = self.smoke._preparar(
+                self._args(handshake=True, peer_id=PEER_APP), self.ident, "X"
+            )
+        self.assertIsNotNone(sesion)
+        # Y tiene que ser utilizable: es la que va a leer el msg2.
+        self.assertTrue(hasattr(sesion, "read_handshake"))
+        self.assertFalse(sesion.complete)
+
+    def test_sin_handshake_no_hay_sesion(self):
+        """El announce no usa Noise, así que no hay sesión que devolver."""
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _paquete, sesion = self.smoke._preparar(self._args(), self.ident, "X")
+        self.assertIsNone(sesion)
+
     def test_el_ttl_del_handshake_es_configurable(self):
         import io
         from contextlib import redirect_stdout
