@@ -258,19 +258,36 @@ La posicion y el tamano son correctos. Lo que **no** se ha resuelto:
 En cambio el **relleno si es identico** en las tres capturas (90 bytes de
 `0x5a`), que es justo lo que hace PKCS#7. Lo que no se entiende es la firma.
 
-### 3.2ter `REQUEST_SYNC`: `m` cambio de 256 a 384
+### 3.2ter `REQUEST_SYNC`: `m` sube con cada intento
 
-Dato del 03-oct, sin explicar:
+Sigue sin explicar **qué** lo fija, pero la serie ya no son dos puntos sueltos.
+`p` no se mueve nunca; `m` crece y `data` crece con él:
 
-| | payload | `p` | `m` | `data` |
-|---|---|---|---|---|
-| primera sesion | 16 B | 7 | **256** | 1 B |
-| segunda sesion | 18 B | 7 | **384** | 3 B |
+| fecha | payload | `p` | `m` | `data` | ¿`msg2`? |
+|---|---|---|---|---|---|
+| 03-oct mañana | 16 B | 7 | 256 | 1 B | no |
+| 03-oct mañana | 16 B | 7 | 256 | 3 B | no |
+| 03-oct tarde | 18 B | 7 | 384 | 3 B | no |
+| 04-oct s1 | 17 B | 7 | 256 | 3 B | **sí** |
+| 04-oct s2 | 16 B | 7 | 256 | 3 B | **sí** |
+| 05-oct 1a | 18 B | 7 | 512 | 4 B | no |
+| 05-oct 2a | 18 B | 7 | 512 | 4 B | **sí** |
+| 05-oct 3a (hoy) | 21 B | 7 | **768** | 8 B | no |
 
-`p` se mantiene; `m` sube de 256 a 384 y `data` de 1 a 3 bytes (los +2 del
-payload). 384 = 256 x 3/2, y no es multiplo de 256, asi que no parece un tamano
-de paquete sino un **limite de bytes a pedir**. No se ha comprobado que lo fija:
-puede depender de la MTU negociada o de lo que la app tiene que mandar.
+Lo que se ve:
+
+- `m` es **256 x n**, con `n` = 1, 1.5, 2, 3. El 384 no es multiplo de 256, así
+  que quizá `m` no sea un número de paquetes sino un límite de bytes.
+- **No crece los días buenos.** 256 los días que el `msg2` llegó, 512 el
+  día que llegó a medias, 768 el día que no llegó. No es una
+  correlación con el éxito.
+- `data` son 3, 4 y 8 bytes. Con 8 bytes hay dos TLVs de 4, o uno de 8.
+
+Lo que **no** se ha comprobado: qué campo del código de la app produce `m` y
+`data`, ni si dependen de la MTU, de lo que la app tiene pendiente de mandar, o de
+su estado de sesión con nosotros. Es el candidato natural para explicar la
+intermitencia del `msg2`, así que está en la lista de lo que hay que mirar en
+`MessageHandler.kt` antes de culpar al BLE.
 
 ### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
 

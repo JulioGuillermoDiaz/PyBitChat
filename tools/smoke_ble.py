@@ -188,6 +188,16 @@ async def principal(args: argparse.Namespace) -> int:
     # arranque haría que fuéramos un par distinto cada vez y nadie nos
     # volvería a encontrar.
     identidad = Identity.cargar_o_crear(args.nickname, ruta=args.identity)
+    # `--nickname` **no** crea una identidad nueva: si el fichero existe, gana.
+    # Es la trampa de por qu{e} se repiten las mismas claves sin querer, y
+    # `--nickname` parece lo contrario porque el flag se llama as{i}.
+    if identidad.nickname != args.nickname:
+        ruta = args.identity or Identity.RUTA_POR_DEFECTO
+        print(f"AVISO: --nickname {args.nickname!r} ignorado. El fichero "
+              f"{ruta}")
+        print(f"  tiene el nickname {identidad.nickname!r} y `cargar_o_crear` "
+              f"gana.")
+        print(f"  Para una identidad de verdad nueva: --identity <otro fichero>")
     print(f"identidad: nickname={identidad.nickname!r}  "
           f"peer_id={identidad.peer_id_hex}")
     print(f"  (guardada en {identidad.guardar(args.identity)})")

@@ -451,6 +451,16 @@ class Identity:
         clave, así que una identidad nueva en cada arranque es un par distinto
         cada vez. Los demás nunca volverían a encontrarnos y las sesiones Noise
         previas quedarían huérfanas.
+
+        ## `nickname` no cambia nada si el fichero existe
+
+        Si `ruta` ya existe, se importa y el `nickname` de `identidad` es el que
+        tenga dentro. El parmetro se acepta para el caso de que no exista todavía
+        y no avisa de que se ha ignorado.
+
+        Para una identidad **de verdad** nueva hay que pasar otro `ruta`. Es lo
+        que hay que hacer para probar si la app rehusa un `peer_id` que ya
+        conoce: ver `smoke_ble.py` y `ESTADO.md` §3.2ter.
         """
         destino = Path(ruta) if ruta else cls.RUTA_POR_DEFECTO
         if destino.exists():

@@ -404,6 +404,70 @@ class TestAnnounceComoPresentacion(unittest.TestCase):
         self.assertTrue(p.header.flags & PacketFlags.HAS_RECIPIENT)
 
 
+class TestNicknameNoCreaIdentidad(unittest.TestCase):
+    """`--nickname` **no** crea una identidad nueva, y el flag no lo dice.
+
+    ## Por qu\xe9 importa
+
+    La identidad persiste a prop\xf6sito, y el `peer_id` se deriva de la clave. Todas
+    las sesiones han usado las mismas claves, as\xed que para la app siempre es el
+    mismo par. Eso es el candidato n\xfamero uno para explicar por qu\xe9 el `msg2`
+    llega unas veces y otras no: si la app guarda una sesi\xf3n para nuestro
+    `peer_id` en alg\xfan estado, puede negarse a empezar otra.
+
+    Y la forma de probarlo es `--identity <otro fichero>`, no `--nickname`: este
+    \xfaltimo se ignora en silencio si el fichero existe, que es justo lo que
+    invita a creer lo contrario.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        import tempfile
+
+        cls.smoke = cls._cargar()
+        cls.tmp = Path(tempfile.mkdtemp())
+
+    @staticmethod
+    def _cargar():
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "smoke_nickname", ROOT / "tools" / "smoke_ble.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_el_mismo_fichero_gana_al_nickname(self):
+        """El comportamiento real, no lo que sugiere el flag."""
+        from pybitchat.protocol.identity import Identity
+
+        ruta = self.tmp / "a.json"
+        a = Identity.cargar_o_crear("primero", ruta=ruta)
+        b = Identity.cargar_o_crear("segundo", ruta=ruta)
+        self.assertEqual(b.nickname, "primero")
+        self.assertEqual(a.peer_id, b.peer_id)
+
+    def test_otro_fichero_si_da_identidad_nueva(self):
+        """La via que si funciona, y la que hay que usar para probar."""
+        from pybitchat.protocol.identity import Identity
+
+        a = Identity.cargar_o_crear("primero", ruta=self.tmp / "a.json")
+        b = Identity.cargar_o_crear("segundo", ruta=self.tmp / "b.json")
+        self.assertNotEqual(a.peer_id, b.peer_id)
+        self.assertEqual(b.nickname, "segundo")
+
+    def test_el_script_avisa_que_el_nickname_se_ignora(self):
+        """Sin aviso, el `--nickname` parece funcionar y no hace nada."""
+        import inspect
+
+        fuente = inspect.getsource(self.smoke)
+        self.assertIn("ignorado", fuente)
+        self.assertIn("--identity", fuente)
+
+
 class TestRetiradaDeCompletarHandshake(unittest.TestCase):
     """`completar_handshake` **no** debe volver, y por qué.
 
