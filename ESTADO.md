@@ -1,12 +1,12 @@
 # Estado del proyecto — punto de reanudación
 
-**Fecha de corte:** 2026-10-03
+**Fecha de corte:** 2026-10-05
 **Objetivo:** cliente BitChat en Python para **Android + Linux** (iOS fuera de
 alcance). Es una **reimplementación**, no un port de `bitchat-tui`.
 
-**En una línea:** el enlace BLE funciona en las dos direcciones contra la app
-Android real, y la identidad se intercambia y se decodifica. **Falta el
-handshake Noise**, que es lo único que queda para cerrar el enlace.
+**En una línea:** el enlace BLE funciona en las dos direcciones, la identidad se
+intercambia y se decodifica, y **el handshake Noise XX completo se ha cerrado**
+contra la app Android real.
 
 > ⚠️ **Antes de nada:** no se porta `bitchat-tui`. Habla un dialecto retirado, así
 > que portarlo daría un cliente incapaz de hablar con ninguna app actual. Ver
@@ -14,66 +14,100 @@ handshake Noise**, que es lo único que queda para cerrar el enlace.
 
 ---
 
-## 1. Donde estamos: **el enlace funciona y la identidad se intercambia**
+## 1. Dónde estamos
 
-Se ha verificado con **trafico real de la app Android**, no con captura del Rust
-ni con lectura del codigo.
+Todo verificado con **tráfico real de la app Android**, no con capturas del Rust ni
+con lectura del código.
 
 | | Estado |
 |---|---|
 | Codec de payloads, v1 y v2 | ✅ |
-| Noise XX handshake (Cacophony/Noise-C) | ✅ 39 vectores |
+| Noise XX (Cacophony/Noise-C) | ✅ 39 vectores |
 | Conformidad con los tests de la app | ✅ 48 casos portados |
-| **Descubrimiento del telefono** | ✅ **visto en 9 direcciones distintas** |
-| **Conexion GATT sin emparejar** | ✅ |
+| **Descubrimiento del teléfono** | ✅ **9 direcciones distintas** |
+| **Conexión GATT sin emparejar** | ✅ |
 | **MTU 517** | ✅ coincide con Android 14+ |
-| **Anuncio como peripheral** | ✅ **funciona** - BlueZ lo acepta, `ce990ff` |
-| **Envio de identidad valida** | ✅ **la app responde con la suya** |
-| **Decodificacion del announce** | ✅ TLV de identidad, `63154e3` |
-| `peer_id` derivado de la clave | ✅ confirmado contra trafico real |
-| Relleno PKCS#7 a 256 B | ✅ confirmado en 4 capturas |
-| **Handshake Noise con la app real** | ❌ **falta - es lo unico que queda** |
+| **Anuncio como peripheral** | ✅ BlueZ lo acepta, `ce990ff` |
+| **Envío de identidad válida** | ✅ **la app responde con la suya** |
+| **Decodificación del announce** | ✅ TLV de identidad, `63154e3` |
+| `peer_id` derivado de la clave | ✅ contra tráfico real |
+| Relleno PKCS#7 a 256 B | ✅ en 4 capturas |
+| Firma Ed25519 de la app | ✅ preimagen deducida, valida |
+| **`msg1` Noise XX aceptado por la app** | ✅ **32 B, 6 de 9 sesiones** |
+| **`msg2` descifrado y verificado** | ✅ **Poly1305 válido, `s` = la del announce** |
+| **`msg3` construido y enviado** | ✅ **64 B, `split()` correcto** |
+| `NOISE_ENCRYPTED` (`0x11`) | ❌ nunca enviado ni recibido |
+| Servidor GATT (la app conecta a nosotros) | ❌ no implementado |
 
-### El hito del 2026-10-03
+### El hito del 2026-10-05
 
-Primera sesion en que **la app responde a nuestro announce con el suyo**, y en
-que lo leemos bien. El intercambio de identidad es completo:
+El **handshake XX completo**, con los tres mensajes y los tamaños correctos:
+
+    msg1  32 B  enviado. La app lo acepta y contesta
+    msg2  96 B  recibido. Poly1305 válido, `s` descifrada, coincide con el announce
+    msg3  64 B  construido y enviado. split() correcto: sesión establecida
+
+La prueba que lo sostiene es una sola línea del terminal:
+
+    remote_static_public: 973585b6...0eb1cf     <- descifrado del msg2
+    TLV 0x02 del announce  973585b6...0eb1cf     <- el que la app anunció
+    -> IGUAL
+    peer_id derivado:      34e01ccea10a8c6d     <- el que esperábamos
+    peer_id de la app:      34e01ccea10a8c6d
+    -> IGUAL
+
+Si el `ck` derivado de nuestro `msg1` no fuera el de la app, el Poly1305 no habría
+validado. Y la clave descifrada deriva al `peer_id` de la app sin que nadie lo haya
+puesto ahí.
+
+### Lo que eso **no** demuestra
+
+Que **nuestro** `split()` haya funcionado. Eso solo lo dice de nuestro lado: si
+nuestro `ck` estuviera mal, `split()` funcionaría igual y las claves de
+transporte serían distintas de las de la app.
+
+Desde fuera, un handshake establecido a un lado y no al otro **no se distinguen**:
+en Noise XX el tercer mensaje no tiene respuesta. Por eso no llegó ningún
+`NOISE_ENCRYPTED`: la app seguía mandando `ANNOUNCE` y `REQUEST_SYNC` en claro,
+que es lo normal cuando no tiene nada cifrado que decir. **Su silencio no es un
+fallo, y no es prueba de nada.**
+
+La prueba de que los dos lados están establecidos es **enviar un `0x11` propio
+y ver si la app lo descifra**. Ver §5.
+
+### El intercambio de identidad, desde el 2026-10-03
 
 ```
 enviando ANNOUNCE de 'pybitchat-probe'   111 B   -> enviado
 --- paquete recibido: 256 B (nº 1) ---  ANNOUNCE      payload 80, firma 64
 --- paquete recibido: 256 B (nº 2) ---  ANNOUNCE      payload 80, firma 64
 --- paquete recibido: 256 B (nº 3) ---  REQUEST_SYNC  carga OK
-total de paquetes recibidos: 3
 ```
 
-Decodificado con los bytes reales:
-
 ```
-nickname       = 'anewells74'
-noise_public   = 973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b
-signing_public = 7ada9dab1bec9eb274cfaa0e3489b259d3219f069fe84cb694aa7c5871a61a88
-peer_id derivado = 34e01ccea10a8c6d  == sender_id del paquete
+nickname          = 'anewells74'
+noise_public      = 973585b6502836ff…
+signing_public    = 7ada9dab1bec9eb2…
+peer_id derivado  = 34e01ccea10a8c6d  == sender_id del paquete
 ```
 
-Lo del `peer_id` es la prueba buena: sale de `sha256(clave Noise)[:8]` y
-coincide con el `sender_id` **sin que nadie lo haya puesto ahi**. Si el TLV
-estuviera mal leido, no saldria.
+Lo del `peer_id` es la prueba buena: sale de `sha256(clave Noise)[:8]` y coincide
+con el `sender_id` **sin que nadie lo haya puesto ahí**.
 
-Los paquetes se guardan en `capturas/recibido.bin`, asi que el trabajo de
-decodificar se hace sobre los bytes y no sobre el terminal.
+### Lo que se midió contra el teléfono
 
-### Lo que se midio contra el telefono
-
-- Servicio `F47B5E2D-...` y characteristic `A1B2C3D4-...`, sin emparejar.
+- Servicio `F47B5E2D-…` y characteristic `A1B2C3D4-…`, sin emparejar.
 - **MTU 517** tras `_acquire_mtu()`. El valor por defecto de BlueZ es **23**, y
-  sin pedirlo el envio grande falla en silencio.
+  sin pedirlo el envío grande falla en silencio.
 - **Las MAC rotan**: nueve direcciones distintas en nueve escaneos. Es una
-  direccion privada resoluble de Android. Por eso `bleak_transport` resuelve
-  por UUID en cada conexion y no cachea nada.
-- El movil anuncia BitChat con **2-3 MACs a la vez**, todas con el UUID de
-  servicio. Se elige la de mayor RSSI **medido**; `-127` es el valor por defecto
-  de bleak cuando BlueZ no mide (`scanner.py:209`), no una senal mala.
+  dirección privada resoluble de Android. Por eso `bleak_transport` resuelve por
+  UUID en cada conexión y no cachea nada.
+- El móvil anuncia BitChat con **2-3 MACs a la vez**, todas con el UUID de
+  servicio. Se elige la de mayor RSSI **medido**; `-127` es el valor por defecto de
+  bleak cuando BlueZ no mide (`scanner.py:209`), no una señal mala.
+- **La respuesta al handshake es intermitente**: 6 sesiones con `msg2`, 3 sin él.
+  Lo más probable es que la app conserve una sesión para nuestro `peer_id` en
+  un estado del que no sale; **no verificado**. Ver §3.1.
 
 ## 2. Los cuatro hallazgos que cambiaron el diseño
 
@@ -131,322 +165,66 @@ verificación de firma re-codifica el paquete, re-comprimir un payload ajeno
 
 ---
 
-## 3. Problemas: dos resueltos, tres abiertos
+## 3. Problemas
 
-VERIFICADO el 2026-10-05. El enlace Noise **funciona** hasta el punto en que
-solo falta el ultimo mensaje:
+Cinco problemas. **Cuatro resueltos**, y el quinto es el trabajo que toca.
 
-    msg1  32 B  enviado. La app lo acepta y contesta
-    msg2  96 B  recibido. Poly1305 válido, `s` descifrada, coincide con el announce
-    msg3  64 B  construido y enviado. `split()` correcto: sesión establecida
+### 3.1 ~~El handshake se ignoraba~~ → era la identidad persistida
 
-**El handshake XX completo funciona contra la app real** (2026-10-05, identidad
-`197a46bdd295303f`). Los tres mensajes, los 32/96/64 B correctos, y las claves de
-transporte derivadas en los dos lados.
+**Símptoma:** el `msg2` llegaba unas veces y otras no. 6 sesiones sí, 3 no, sin
+patrón en el orden de los paquetes ni en el announce previo.
 
-### Lo que eso **no** demuestra
+**Hipótesis, no verificada:** `Identity.cargar_o_crear` recupera el fichero si
+existe, y el `peer_id` se deriva de la clave. Todas las sesiones usaban las mismas
+claves, así que para la app siempre era el mismo par. Si la app guarda una
+`NoiseSession` para ese `peer_id` y queda en un estado del que no sale, el
+handshake se ignoraría.
 
-Que **nuestro** `split()` haya funcionado. Eso solo lo dice de nuestro lado: si
-nuestro `ck` estuviera mal, `split()` funcionaría igual y las claves de transporte
-serían distintas de las de la app. Desde fuera, un handshake establecido a un
-lado y no al otro **no se distinguen**: en Noise XX el tercer mensaje no tiene
-respuesta.
+**Cómo se comprueba:** alternar identidades en ejecuciones seguidas. Una muestra a
+favor no es evidencia: el 2026-10-05 el `msg2` llegó a la primera con identidad
+nueva, y no había llegado en las dos inmediatamente anteriores con la vieja.
 
-Por eso no llegó ningún `NOISE_ENCRYPTED` (`0x11`): la app seguía mandando
-`ANNOUNCE` y `REQUEST_SYNC` en claro, que es lo normal cuando no tiene nada
-cifrado que decir. **Su silencio no es un fallo, y no es prueba de nada.**
+**Operativamente:** para una ejecución de prueba, **identidad nueva**:
 
-La prueba de que los dos lados están establecidos es **enviar un `0x11` propio y
-ver si la app lo descifra**. El soporte ya está: `NoiseTransportCipher.encrypt()`
-antepone el nonce de 4 B en big-endian (`NoiseSession.kt:133-143`), que es lo que
-espera la app.
+    ./.venv/bin/python tools/smoke_ble.py --msg3 \
+        --identity /tmp/nueva.json \
+        --peer-id 34e01ccea10a8c6d \
+        --noise-public 973585b6…0eb1cf
 
-Ver `ESTADO.md` 3.5.
+Ojo: **`--nickname` no crea identidad nueva.** El fichero gana y el flag se ignora
+en silencio, que es justo lo que invita a creer lo contrario. Para eso está
+`--identity`.
 
-### 3.1 El `msg2` de 96 B: **RESUELTO** el 2026-10-05
+### 3.2 ~~Los tres tamaños del handshake~~ → 32 / 96 / 64, derivados y medidos
 
-**Este ya no es un problema abierto.** Los 96 B son los correctos y salen del
-codigo de la app. Lo que estaba mal era la cuenta.
+**Estaba cerrado y nadie lo había derivado.** Se dieron tres cifras seguidas
+para el `msg2` — 176, 96 y 128 — y **las tres estaban mal**. La cuenta:
 
-### Lo que funciona
+    E(32) + EE(0) + S(32+16) + ES(0) + tag(16) = 96
 
-El 2026-10-04 la app **respondio** a nuestro `msg1`:
+`EE`, `ES` y `SE` son `mixDH`: derivan clave y **no emiten bytes**. Contarlos como 48
+da 176, 144 o 128 según qué tokens se olviden, y ninguna es 96.
 
-    recipient = 4baf99fa0b9298ba   <- nuestro peer_id
-    payload   = 96 B, tipo 0x10
+El tag sale porque `ChaChaPolyCipherState.getMACLength()` es `haskey ? 16 : 0`:
+en `msg1` todavía no hay clave y no se emite; en `msg2` ya la hay, porque el primer
+`mixKey` ocurre en `EE`.
 
-Y el 2026-10-05 volvio a hacerlo. Todo el `noise/handshake.py` que hace falta
-para el `msg1` **esta verificado**: la app lo acepta.
+**Además de deducido, medido:** un XX completo con los dos roles de nuestro
+`HandshakeSession` da 32 / 96 / 64 exactos, con las mismas huellas de handshake.
+`tests/test_tamanos_handshake.py` monta el handshake entero.
 
-### Los tres tamanos, derivados
+Los tres tamaños son derivación del código de la app **y** medición con
+nuestro motor. Las dos cosas hacen falta: una suma correcta sobre bytes ajenos no
+prueba que el cifrado sea el nuestro.
 
-`Pattern.java`, `noise_pattern_XX`:
+### 3.3 ~~El `msg2` no se podía leer~~ → solo en el proceso que lo mandó
 
-    0:flags 1:E 2:FLIP 3:E 4:EE 5:S 6:ES 7:FLIP 8:S 9:SE
-
-`HandshakeState.writeMessage` termina **siempre** con `encryptAndHash(..., 0)`,
-pero `ChaChaPolyCipherState` solo emite tag **si ya hay clave**:
-
-    getMACLength() = haskey ? 16 : 0
-    if (!haskey) { arraycopy(...); return length; }   // sin tag
-
-| msg | como se compone | bytes |
-|---|---|---|
-| `msg1` | `E`(32) + tag vacio, **sin clave todavia** | **32** |
-| `msg2` | `E`(32) + `EE`(0) + `S`(32+16) + `ES`(0) + tag(16) | **96** |
-| `msg3` | `S`(32+16) + `SE`(0) + tag(16) | **64** |
-
-`EE`, `ES` y `SE` son `mixDH`: derivan clave y **no emiten bytes**. Ese es el
-error entero, y va en las dos direcciones: los 176 y los 128 salian de contar
-`mixDH` como si ocuparan 48.
-
-`msg1` mide 32 y no 48 porque al escribirlo **todavia no hay clave** —el
-primer `mixKey` ocurre en `EE`, dentro de `msg2`—, asi que el payload vacio no
-produce tag. Por eso `MSG1_SIZE` se queda en 32.
-
-### Las tres cuentas que se dijeron, y por que estaban mal
-
-| cuenta | total | error |
-|---|---|---|
-| `E` + `EE`(48) + `S`(48) + `ES`(48) | 176 | conto los `mixDH` como 48 |
-| `E`(32) + `EE`(48) + `S`(48) + `ES`(0) | 144 | conto `EE` como 48 |
-| `E`(32) + `EE`(48) + `S`(48) + `ES`(0) | **128** | le falta el tag final (16) |
-
-Ninguna puede volver a decir 96: eso lo comprueban los tests de
-`tests/test_tamanos_handshake.py`.
-
-### Lo que faltaba, y por que no se sabia
-
-El dato de "el `msg2` no entrega clave estatica" se escribio sin
-`noiseprotocol` instalada en el host, asi que `read_message` **nunca llego a
-ejecutarse** sobre el `msg2` real. Con la libreria instalada ya se puede.
-
-Y la clave estatica **si viaja** en el `msg2`, cifrada, en los bytes 32..63.
-
-### Lo que queda: una comprobacion, no un desarrollo
-
-    ./.venv/bin/python tools/probe_msg2.py
-
-| `remote_static_public` | Conclusion |
-|---|---|
-| igual al TLV `0x02` del announce | la derivacion coincide |
-| `None` o error de descifrado | el `msg2` no es XX con ChaChaPoly |
-
-Con la primera, la cadena de derivacion coincide y se puede escribir el
-`msg3` de 64 B con criterio. Con la segunda, el desglose de 96 B es aritmetica
-sobre una suposicion y habra que mirar otra cosa.
-
-`probe_msg2.py` ya usa la cuenta correcta, y avisa de que un tamano que cuadra
-**no** demuestra el reparto. La comprobacion independiente del tamano es que
-los bytes 0..31 sean un punto X25519 valido, porque la efimera va en claro.
-
-### 3.2 Relleno: es PKCS#7, confirmado - tras fallar dos veces
-
-Las capturas, con la **firma** de 64 B dentro del contenido:
-
-| Paquete | Real | Relleno | Byte |
-|---|---|---|---|
-| ANNOUNCE (02-oct) | 166 B | 90 B | `0x5a` = 90 |
-| filler (02-oct) | 96 B | 160 B | `0xa0` = 160 |
-| ANNOUNCE (03-oct) | 166 B | 90 B | `0x5a` = 90 |
-| ANNOUNCE (03-oct, 2o) | 166 B | 90 B | `0x5a` = 90 |
-
-La longitud del relleno **es** el valor del byte, en las cuatro. `166 = 14 + 8 +
-80 + 64` y `256 - 166 = 90 = 0x5a`.
-
-**Este dato se afirmo bien, se nego mal, y se volvio a afirmar bien.** Se
-consigna por que, porque el error dice mas que el resultado:
-
-1. La primera vez cuadraba **por casualidad**: el caso del test estaba escrito
-   `14 + 8 + 80 + 64`, con los 64 de la firma **supuestos**.
-2. Al medir con bytes reales se concluyo que no era PKCS#7, porque se conto
-   desde los 102 B sin la firma: `256 - 102 = 154`, contra un byte de 90. El
-   fallo fue **no mirar `packet.py`**, que ya define `SIGNATURE_SIZE = 64` y lee
-   la firma justo tras el payload. Ese fichero estaba a un `grep` de distancia.
-
-`pkcs7_pad_to_bucket` **si** reproduce el relleno real de la app.
-
-### 3.2bis Los 64 bytes: son la firma, pero no valida
-
-```
-102 B tal cual        -> truncado leyendo signature: 64 B en offset 102
-102 + 64              -> OK, payload 80, firma si (64 B)
-```
-
-La posicion y el tamano son correctos. Lo que **no** se ha resuelto:
-
-- **No valida** como firma Ed25519 con la clave `0x03` del propio announce,
-  sobre seis mensajes candidatos (payload TLV, cabecera+sender+payload,
-  sender+payload, TLV sin la clave de firma, solo el nickname, TLV completo).
-- **Cambia en cada announce**: con el payload byte a byte identico, las tres
-  firmas difieren en 64 de 64 bytes. Una firma determinista daria lo mismo, asi
-  que o cubre algo que cambia (el timestamp de la cabecera) o no es una firma.
-- El byte de `flags` del announce real es `0x00`: la app **no** activa
-  `HAS_SIGNATURE` pero manda los 64 bytes. Con `flags=0` el parser no los
-  consume, y por eso hubo que concatenarlos a mano.
-
-En cambio el **relleno si es identico** en las tres capturas (90 bytes de
-`0x5a`), que es justo lo que hace PKCS#7. Lo que no se entiende es la firma.
-
-### 3.2ter `REQUEST_SYNC`: `m` sube con cada intento
-
-Sigue sin explicar **qué** lo fija, pero la serie ya no son dos puntos sueltos.
-`p` no se mueve nunca; `m` crece y `data` crece con él:
-
-| fecha | payload | `p` | `m` | `data` | ¿`msg2`? |
-|---|---|---|---|---|---|
-| 03-oct mañana | 16 B | 7 | 256 | 1 B | no |
-| 03-oct mañana | 16 B | 7 | 256 | 3 B | no |
-| 03-oct tarde | 18 B | 7 | 384 | 3 B | no |
-| 04-oct s1 | 17 B | 7 | 256 | 3 B | **sí** |
-| 04-oct s2 | 16 B | 7 | 256 | 3 B | **sí** |
-| 05-oct 1a | 18 B | 7 | 512 | 4 B | no |
-| 05-oct 2a | 18 B | 7 | 512 | 4 B | **sí** |
-| 05-oct 3a | 21 B | 7 | 768 | 8 B | no |
-| 05-oct 4a | 21 B | 7 | 768 | 8 B | **sí** |
-| 05-oct 5a | 22 B | 7 | **896** | 8 B | **sí** |
-
-Lo que se ve:
-
-- **Todos los `m` son múltiplos de 128**: 256=2x128, 384=3x128, 512=4x128,
-  768=6x128, 896=7x128. Con cinco puntos ya no es casualidad, y `m` es un número
-  de **bytes** pedidos, no de paquetes: por eso no es multiplo de 256. La serie
-  se lee como "cuánto más hay que pedir", en unidades de 128.
-- El `data` de la 5a sesión es 8 B; antes 3, 4 y 7. Crece, pero no sigue a
-  `m` de forma directa.
-- **No crece los días buenos.** 256 los días que el `msg2` llegó, 512 el
-  día que llegó a medias, 768 el día que no llegó. No es una
-  correlación con el éxito.
-- `data` son 3, 4 y 8 bytes. Con 8 bytes hay dos TLVs de 4, o uno de 8.
-
-Lo que **no** se ha comprobado: qué campo del código de la app produce `m` y
-`data`, ni si dependen de la MTU, de lo que la app tiene pendiente de mandar, o de
-su estado de sesión con nosotros. Es el candidato natural para explicar la
-intermitencia del `msg2`, así que está en la lista de lo que hay que mirar en
-`MessageHandler.kt` antes de culpar al BLE.
-
-### 3.2quater La identidad persistida, y por qué quizá el `msg2` es intermitente
-
-No verificado. **Una muestra a favor, y el resto en contra.**
-
-Todas las sesiones hasta la 05-oct 4a usaron las mismas claves, porque
-`Identity.cargar_o_crear` recupera el fichero si existe. Para la app siempre era
-el mismo par, `4baf99fa0b9298ba`.
-
-Si la app guarda una `NoiseSession` para ese `peer_id` y queda en un estado en el
-que no acepta empezar otra, el handshake se ignoraría. Encajaria con que el
-`msg2` llegara en las sesiones OVE primeras y no en las ultimas.
-
-La 05-oct 4a usó una identidad **nueva** (`--identity /tmp/otro.json`,
-`peer_id=1ee55365c50d8e11`) y el `msg2` llegó a la primera. Antes de esa, con la
-identidad vieja, no había llegado en las dos inmediatamente anteriores.
-
-Eso es **n=1 contra n=1**. No lo da por bueno. La forma de comprobarlo es
-alternar identidades en ejecuciones seguidas y ver si el `msg2` depende solo de
-cuánto nueva es, o si hay algo más (el móvil sin desbloquear, los
-15 min, el
-BLE).
-
-Operativamente: para una ejecución de prueba, **usar identidad nueva**, que además
-hace el trabajo de `_leer_msg2` más limpio. `--nickname` **no** sirve, se ignora
-en silencio si el fichero existe.
-
-### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
-
-`payload_len = 2` pero el contenido son 96 B. Los 72 sobrantes son `0xff`, que
-es el identificador de emisor general de BitChat repetido.
-
-Además nuestro `MESSAGE` rechaza el payload de 4 bytes (`"exit"`) porque
-`MIN_PAYLOAD_SIZE = 13`. **No está claro si la app se sale de spec o si nuestro
-mínimo es demasiado estricto.**
-
----
-
-### 3.4 El announce NO va antes del handshake
-
-Probado el 2026-10-05 y **deshecho**. Mandar el announce antes del handshake no
-ayuda; la hipotesis de que hacia falta una presentacion previa era falsa.
-
-Lo que se vio:
-
-| | Enviado | `msg2` |
-|---|---|---|
-| 04-oct | handshake **solo** | 96 B, dos veces |
-| 05-oct, 1a vez | announce **+** handshake | ninguno |
-| 05-oct, 2a vez | announce **+** handshake | **96 B** |
-
-La primera vez que fallo, la conclusion "el announce empeora las cosas" era una
-muestra de **una**. A la segunda volvio a llegar el `msg2` con el announce
-puesto, asi que la conclusion no se sostiene: el fallo fue de sesion —movil sin
-desbloquear, mas de 15 min inactivo, el que sea— y no del orden.
-
-El orden no es lo que decide. Lo que decide es que el `msg1` lleve
-`recipient_id`, que ya lleva (`MessageHandler.kt:375-377` lo descarta en
-silencio sin el).
-
-Y esto se dejo dicho porque es el tercer fallo del mismo tipo: ir a por una
-hipotesis sin mirar lo que ya se sabia. El 04-oct el handshake **ya funcionaba
-sin announce**, con dos sesiones de evidencia, y eso estaba en este documento.
-
-### 3.5 El `msg2` se lee, y la cadena coincide: **VERIFICADO** 2026-10-05
-
-Descubierto el 2026-10-05. `probe_msg2.py` contestaba siempre que no:
+`probe_msg2.py` contestaba siempre que no:
 
     leído sin error. carga útil: 64 B
     remote_static_public: None
 
 Las dos líneas eran síntomas del mismo error: **nunca se escribió el `msg1`**.
-
-### El resultado
-
-Con una identidad nueva y la sesión viva, en el proceso que mandó el `msg1`:
-
-    --- leyendo el msg2 con la sesión viva ---
-      leído. carga útil: 0 B  <- lo esperado
-      remote_static_public: <los 32 B de la clave de la app>
-
-      TLV 0x02 del announce  <los mismos 32 B>
-      clave del msg2         <los mismos 32 B>
-      -> IGUAL
-      peer_id derivado:      34e01ccea10a8c6d
-      peer_id de la app:      34e01ccea10a8c6d
-      -> IGUAL
-
-Eso dice tres cosas a la vez:
-
-1. **El `msg1` de 32 B es correcto.** Si el `ck` derivado de él no fuera el de la
-   app, el Poly1305 del `msg2` no habría validado.
-2. **El `msg2` de 96 B es `e` + `s` cifrada + tag.** Descifrado, y la clave que
-   sale es la del announce.
-3. **La identidad queda autenticada.** La clave descifrada deriva al `peer_id` de
-   la app, que es el que esperáamos.
-
-### El `msg3`: escrito, con dos guardas
-
-Decidió el usuario. Vive en `construir_msg3()`, y tiene dos condiciones:
-
-1. **`--msg3`** está puesto. Sin el flag, las ejecuciones que se usan para otra
-   cosa no cambian.
-2. **La lectura dio `IGUAL`.**
-
-La segunda es la que protege de verdad. Un `msg3` con bytes plausibles y una
-derivación equivocada es **peor que no enviarlo**: desde fuera, un mensaje mal
-derivado y uno ausente pueden ser lo mismo, y no hay forma de distinguirlos sin
-adivinar. Un `msg3` con la `s` correcta por casualidad no se distingue de uno
-bien derivado.
-
-Hay un tercer filtro: si no mide 64 B, no se envía. Tampoco a modo de prueba.
-
-Va en otro paquete `NOISE_HANDSHAKE` (`0x10`), que es el mismo tipo que usa la
-app para el `msg1` y el `msg2`, y **con `recipient_id`**: sin él lo descarta en
-silencio (`MessageHandler.kt:375-377`).
-
-**Lo que no se hace todavía:** descifrar nada de lo que llegue después
-(`NOISE_ENCRYPTED`, `0x11`). El handshake completo no tiene respuesta propia en
-Noise: lo que llega después ya va cifrado con la clave de transporte, y eso es
-otro paso con otra decisión. Aquí solo se registra qué tipos llegan.
-
-### Cómo fue la causa
 
 `noiseprotocol` no lleva un contador de mensajes: lleva una lista de patrones, uno
 por mensaje, y cada `read_message` hace `pop(0)` del primero
@@ -454,18 +232,17 @@ por mensaje, y cada `read_message` hace `pop(0)` del primero
 
     [[e], [e, ee, s, es], [s, se]]
 
-El `msg1` se lleva el primero. Sin `msg1` escrito, el `pop(0)` se come `[e]`, se
-procesa **un** token, y los 64 B de cola quedan de carga útil. Sin `mix_key` no
-hay clave, así que ese tramo ni se intenta descifrar: sale tal cual, y como no
-se comprueba nada, **no puede fallar**. De ahí el "leído sin error".
+El `msg1` se lleva el primero. Sin `msg1` escrito, el `pop(0)` se come `[e]`, procesa
+**un** token, y los 64 B de cola quedan de carga útil. Sin `mix_key` no hay clave,
+así que ese tramo ni se intenta descifrar: sale tal cual. De ahí el "leído sin
+error": **no lee nada, y por eso no puede fallar.**
 
-### Y el `msg2` no se puede descifrar a posteriori
+**Y ni siquiera escribiendo un `msg1` nuevo serviría.** Descifrar el `msg2` real
+exige la clave efímera **privada** del `msg1` que la app recibió de verdad, y esa
+solo existía en el proceso que lo mandó. La captura no la tiene.
 
-Haga falta la clave efímera **privada** del `msg1` que la app recibió de verdad, y
-esa solo existía en el proceso que lo mandó. La captura no la tiene. Por eso
-la lectura vive en `smoke_ble.py` y no en un script sobre el fichero.
-
-### Los cuatro desenlaces, todos distinguibles por la salida
+Por eso la lectura vive en `smoke_ble.py` (`_leer_msg2`), no en un script sobre el
+fichero. Los cuatro desenlaces se distinguen por la salida:
 
 | Salida | Qué ha pasado |
 |---|---|
@@ -474,12 +251,78 @@ la lectura vive en `smoke_ble.py` y no en un script sobre el fichero.
 | `carga útil: 64 B` | el motor solo consumió `[e]`: bug de quien llama |
 | `ERROR al leer` | el Poly1305 no validó: el `ck` no es el nuestro |
 
-### Archivos
+### 3.4 ~~El announce antes del handshake~~ → no, y tampoco al revés
 
-- `tools/smoke_ble.py`: `_leer_msg2()`, y `_escuchar_handshake` recibe la sesión.
-- `tools/probe_msg2.py`: ya no intenta descifrar, y **explica por qué no puede**.
-- `tests/test_msg2_en_proceso.py`: la firma del error, 9 tests.
-- `tests/test_leer_msg2.py`: los cuatro desenlaces sin Bluetooth, 18 tests.
+Se probó y se deshizo. Mandar el announce antes **empeoró** las cosas:
+
+| | Enviado | `msg2` |
+|---|---|---|
+| 04-oct | handshake **solo** | ✅ 96 B, dos veces |
+| 05-oct, 1ª | announce **+** handshake | ❌ |
+| 05-oct, 2ª | announce **+** handshake | ✅ 96 B |
+
+La primera vez que falló, la conclusión "el announce empeora las cosas" era una
+muestra de **una**. A la segunda volvió a llegar el `msg2` con el announce puesto.
+
+Lo que **sí** es cierto, y se conserva: un announce **no** lleva `recipient_id` —
+eso es lo que lo hace broadcast — y el handshake **sí** lo lleva, y por eso la app
+lo acepta (`MessageHandler.kt:375-377`).
+
+### 3.5 ~~El relleno~~ → PKCS#7, confirmado tras fallar dos veces
+
+Tras dos intentos fallidos, confirmado en cuatro capturas reales. Los bytes de
+relleno se ven en todos los paquetes de 256 B: `c2`, `5a`, `42`, `98`, `95`, `94` —
+todos el byte de longitud repetido.
+
+**Lo que costó encontrar:** que `should_pad_for_ble()` dice una cosa y el tráfico
+capturado otra. Se dejó como está y se documentó la contradicción: seguir el
+código es lo verificable, la captura es una muestra.
+
+### 3.6 ~~La firma~~ → Ed25519, preimagen deducida
+
+`BinaryProtocol.kt:116-131`. La preimagen es el paquete entero con **TTL=0,
+flags=0x00, sin firma, y relleno PKCS#7 a 256 B**. El TTL se fija a 0 porque baja en
+cada salto, y si entrara en la preimagen cualquier paquete reenviado una sola vez
+dejaría de validar.
+
+Los 64 B que parecía sobrantes en un announce son la firma, no relleno. La app firma
+sus announces (`flags=0x02`); nuestros handshakes van sin firma porque así lo hace
+ella (`MessageHandler.kt:392`).
+
+### 3.7 ~~El `MESSAGE` de 72 B de `0xff`~~ → sin explicar, y no bloquea nada
+
+Queda abierto y **no importa**. Es un `MESSAGE` de la app cuyo payload son 72 bytes
+de `0xff`. No bloquea nada: el enlace funciona sin descifrarlo.
+
+### 3.8 `REQUEST_SYNC`: `m` son múltiplos de 128
+
+Sin explicar qué lo fija, pero el patrón ya se ve:
+
+| fecha | payload | `p` | `m` | `data` | ¿`msg2`? |
+|---|---|---|---|---|---|
+| 03-oct mañana | 16 B | 7 | 256 | 1 B | no |
+| 03-oct mañana | 16 B | 7 | 256 | 3 B | no |
+| 03-oct tarde | 18 B | 7 | 384 | 3 B | no |
+| 04-oct s1 | 17 B | 7 | 256 | 3 B | **sí** |
+| 04-oct s2 | 16 B | 7 | 256 | 3 B | **sí** |
+| 05-oct 1ª | 18 B | 7 | 512 | 4 B | no |
+| 05-oct 2ª | 18 B | 7 | 512 | 4 B | **sí** |
+| 05-oct 3ª | 21 B | 7 | 768 | 8 B | no |
+| 05-oct 4ª | 21 B | 7 | 768 | 8 B | **sí** |
+| 05-oct 5ª | 22 B | 7 | **896** | 8 B | **sí** |
+
+- `p` = 7 en las diez, sin moverse.
+- **Todos los `m` son múltiplos de 128**: 2x, 3x, 4x, 6x, 7x. Con cinco puntos ya no
+  es casualidad. Es un número de **bytes** pedidos, no de paquetes — por eso no es
+  múltiplo de 256.
+- `data` son 3, 4, 7 u 8 bytes. No sigue a `m` de forma directa.
+- **`m` no crece los días buenos**, así que no explica la intermitencia del `msg2`.
+
+El campo es TLV con tipo de 1 B y longitud de 2 B en big-endian: `p` es el TLV `0x01`,
+`m` el `0x02`, y `data` el `0x03`. Lo que produce `m` y `data` está sin mirar, y es
+lo primero que habría que buscar en `MessageHandler.kt` antes de culpar al BLE.
+
+--- 
 
 ## 4. Cómo arrancar
 
@@ -492,14 +335,18 @@ cd ~/PyBitChat && git pull
 
 **Mira el `exit=`, no el texto.** Ver §6, punto 11.
 
-> **Sólo en el host Linux salen los 462 tests sin `skipped=`.** El 2026-10-04
-> fue la primera vez: en la VM de Windows faltan `bleak` y `dbus_fast`, así que
-> 10 tests se saltan y **no comprueban nada**. Contarlos como verdes era el
-> error, y por eso el runner ahora imprime **qué** se salta y por qué.
+> **Sólo en el host Linux salen los 616 tests sin `skipped=`.** En la VM de
+> Windows faltan `bleak` y `dbus_fast`, así que **14 tests se saltan y no
+> comprueban nada**. Contarlos como verdes era un error real, y por eso el
+> runner ahora imprime **qué** se salta y por qué.
 >
-> Un `skipped=10` en la VM no es un problema. Un test roto esperándose en el
+> Un `skipped=14` en la VM no es un problema. Un test roto esperándose en el
 > host, sí. Ejecutar la suite completa **allí** antes de dar por buena una
 > jornada.
+>
+> El motor de Noise (`noise.noise_protocol`) **sí** importa en la VM, así que
+> los tests de handshake se ejecutan en los dos sitios. La distribución en PyPI
+> se llama `noiseprotocol`; el módulo, `noise`. Ver §6, punto 21.
 
 Si falta el venv:
 ```bash
@@ -545,12 +392,25 @@ Opciones útiles de `smoke_ble.py`:
 
 | Opción | Por qué |
 |---|---|
-| `--scan 30` | el escaneo corto es la causa más fácil de un falso negativo |
-| `--guardar RUTA` | dónde escribir los paquetes; por defecto `capturas/recibido.bin` |
-| `--identity RUTA` | usar otra identidad, para no tocar la guardada |
-| `--paquete RUTA` | reenviar bytes capturados tal cual, sin reconstruir |
+| `--handshake` | mandar el `msg1` en vez de un announce |
+| `--msg3` | mandar el `msg3` **solo si** la lectura del `msg2` dio `IGUAL` |
+| `--peer-id HEX` | `recipient_id`. Sin el, la app lo descarta |
+| `--noise-public HEX` | clave Noise de la app, para comparar |
+| `--identity RUTA` | identidad nueva. Prueba la intermitencia |
+| `--scan 30` | el escaneo corto causa fáciles falsos negativos |
+| `--segundos N` | cuanto esperar. 20 s, y 20 más tras el `msg3` |
+| `--guardar RUTA` | dónde escribir. Por defecto `capturas/recibido.bin` |
+| `--paquete RUTA` | reenviar bytes capturados tal cual |
+
+Y dos avisos que el script emite solo:
+
+- si `--nickname` se ha ignorado por existir el fichero de identidad
+- si `peek` no encuentra el characteristic de BitChat
 
 ### Reparto de tests
+
+**616 tests.** En el host Linux salen los 616 sin `skipped=`; en la VM de Windows se
+saltan 14, que son los que necesitan `bleak`, `dbus_fast` o el motor de Noise.
 
 | Fichero | Tests | Cubre |
 |---|---|---|
@@ -558,98 +418,119 @@ Opciones útiles de `smoke_ble.py`:
 | `test_identity.py` | 64 | TLV de identidad, `peer_id`, firma, relleno |
 | `test_current_payloads.py` | 52 | `ANNOUNCE` TLV, `MESSAGE`, fichero, voz |
 | `test_conformance.py` | 48 | Conformidad con los tests de la app |
+| `test_noise_handshake.py` | 44 | `msg1`, empaquetado, destino obligatorio |
+| `test_probe_msg2.py` | 42 | Desglose, salto de relleno, estado del motor |
 | `test_noise_vectors.py` | 39 | Handshake XX, framing, anti-replay |
 | `test_smoke_ble.py` | 28 | Announce, hexdump, elección de peer, RSSI |
 | `test_advertiser.py` | 27 | Anuncio: `Variant`, firmas, rutas D-Bus |
 | `test_payloads.py` | 25 | Fragmentación, opacidad |
 | `test_probe_advertise.py` | 22 | Informe de escaneo, tiempos, limitaciones |
+| `test_tamanos_handshake.py` | 21 | 32/96/64, deducidos **y** medidos |
 | `test_dialect.py` | 21 | Constantes Android con `file:line` |
-| `test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad |
-| `test_golden_packets.py` | 19 | Los 21 paquetes reales, byte a byte |
+| `test_msg3.py` | 20 | Las dos guardas del `msg3`, sin BLE |
+| `test_golden_packets.py` | 19 | Los paquetes reales, byte a byte |
+| `test_dispatch.py` | 19 | Despacho por dialecto y ambigùedad |
+| `test_leer_msg2.py` | 18 | Los cuatro desenlaces de `_leer_msg2` |
+| `test_bleak_transport.py` | 12 | Transporte real; se salta sin `bleak` |
+| `test_msg2_en_proceso.py` | 9 | La firma del error de `pop(0)` |
 | `test_run_tests.py` | 8 | El runner: informe de saltados, código de salida |
-| `test_bleak_transport.py` | 12 | Transporte real; 6 se saltan sin `bleak` |
-| **Total** | **462** | 0 saltados en Linux; 10 saltados en Windows |
+| **Total** | **616** | 14 saltados en Windows, 0 en Linux |
 
 ### Ficheros del proyecto
 
-- `src/pybitchat/protocol/` — `types.py` (enums, constantes, política de
-  relleno), `packet.py` (cabecera v1/v2, compresión, `WirePayload`, firma),
-  `identity.py` (identidad, TLV, `peer_id`, firma Ed25519), `payloads.py`
-  (despacho por dialecto), `compression.py`, `reassembly.py`, `message.py`,
-  `tlv.py`, `voice.py`
-- `src/pybitchat/noise/` — `session.py`, `framing.py`, `primitives.py`
-- `src/pybitchat/ble/` — `gatt.py` (UUIDs), `bleak_transport.py`,
-  `advertiser.py`
-- `src/pybitchat/mesh/transport.py` — `Transport` abstracto y `MockTransport`
-- `EVALUACION-MIGRACION.md` — informe, 939 líneas, 14 secciones
-- `capturas/recibido.bin` — paquetes reales del móvil (**no** versionado)
+**`src/pybitchat/protocol/`** — el formato de paquete
+
+| Módulo | Qué hace |
+|---|---|
+| `types.py` | enums, constantes Android con `file:line`, política de relleno |
+| `packet.py` | cabecera v1/v2, compresión, `WirePayload`, firma, relleno |
+| `identity.py` | identidad persistente, TLV de identidad, `peer_id`, firma |
+| `payloads.py` | despacho por dialecto; opaco lo que no se conoce |
+| `tlv.py` | TLV genérico, longitud de 1 B |
+| `compression.py` | DEFLATE crudo, `wbits=-15` |
+| `reassembly.py`, `payloads` | fragmentación y reensamblado |
+| `message.py`, `voice.py` | `MESSAGE` y tramas de voz |
+
+**`src/pybitchat/noise/`** — el handshake
+
+| Módulo | Qué hace |
+|---|---|
+| `session.py` | `HandshakeSession` sobre `noiseprotocol`; 39 vectores |
+| `handshake.py` | `msg1`, tamaños derivados, empaquetado del `NOISE_HANDSHAKE` |
+| `framing.py` | transporte: nonce de 4 B big-endian + ChaChaPoly, anti-replay |
+| `primitives.py` | X25519, ChaChaPoly, HKDF |
+| `state_errors.py` | errores propios, para no filtrar la librería de abajo |
+
+**`src/pybitchat/ble/`** — el enlace
+
+| Módulo | Qué hace |
+|---|---|
+| `gatt.py` | UUIDs del servicio y del characteristic |
+| `bleak_transport.py` | conexión, MTU, escritura |
+| `advertiser.py` | anuncio como peripheral sobre `LEAdvertisingManager1` |
+
+**`tools/`**
+
+| Guion | Para qué |
+|---|---|
+| `run_tests.py` | la suite entera, por **código de salida**, e informa de saltados |
+| `smoke_ble.py` | conecta, manda `msg1`, lee el `msg2`, envía el `msg3` |
+| `probe_advertise.py` | anuncia y escanea, para ver si nos encuentran |
+| `probe_msg2.py` | desglose de los 96 B del `msg2` desde un fichero |
+| `extract_vectors.py` | regenera `tests/fixtures/vectors.json` |
+
+**Otros**: `src/pybitchat/mesh/transport.py` (interfaz y `MockTransport`),
+`EVALUACION-MIGRACION.md` (informe de 14 secciones), `capturas/recibido.bin`
+(paquetes reales del móvil, **no** versionado).
 
 ---
 
-## 5. Por donde seguir
+## 5. Por dónde seguir
 
-### Primero: el handshake Noise (0x10)
+### Lo siguiente: `NOISE_ENCRYPTED` (`0x11`)
 
-**Es lo unico que queda para cerrar el enlace.** El decodificador del announce
-ya esta arreglado (`63154e3`), asi que la pregunta de si hace falta el servidor
-GATT esta contestada por el §1: la app nos descubrio, conecto y respondio a
-nuestro announce sobre la conexion que **nosotros** abrimos. El lado central
-basta.
+**Es el paso que falta para poder hablar con la app a través de ella.** El
+handshake está cerrado de nuestro lado; lo que no está probado es que el de la app
+lo esté también.
 
-Y ahora hay algo que antes no habia: **la clave Noise de la app es publica y la
-tenemos**, esta en el TLV `0x02` de su announce:
+La prueba es una sola: **mandar un `0x11` y ver si la app lo descifra.** Si lo
+descifra, los dos lados estaban establecidos y las claves coinciden.
 
-```
-973585b6502836ff5767934bdb4c62458c48b87e94c02d470797e93d21052f6b
-```
+El soporte ya existe:
 
-Lo que ya esta hecho y verificado:
+- `NoiseTransportCipher.encrypt()` antepone el nonce de 4 B en **big-endian**, que
+  es lo que espera `NoiseSession.kt:133-143`. El nonce AEAD de 12 B va en
+  little-endian (`ChaChaCore.java:144-150`). Ver `noise/framing.py`, que lo
+  documenta con `file:line`.
+- Habría que elegir el payload: el mismo `IdentityAnnouncement` en claro dentro
+  del `0x11`, o uno nuevo de presentación. **Es una decisión, no un detalle.**
 
-- La parte criptografica: Noise XX con `noiseprotocol`, 39 vectores de Cacophony
-  verificados.
-- La preimagen de firma: `to_binary_data_for_signing()` en `packet.py`.
-- La identidad y el `peer_id` derivado, con el announce real de 80 B.
+Lo que **no** se haría sin decidir: mandar mensajes de verdad, ficheros o voz.
+Todo eso va dentro del `0x11`, así que el formato del payload se decide una vez y
+se reutiliza.
 
-Lo que falta: **el transporte que mueva `msg1`** y lo envíe como
-`NOISE_HANDSHAKE`. Ningun `0x10` ha llegado de la app, asi que hay dos
-posibilidades que no se pueden distinguir sin probar: que nosotros no lo
-mandemos, o que la app no lo mande porque no nos ha emparejado todavia.
+### Lo que quedó abierto, en orden de irrelevancia
 
-**Detalle que ya se sabe:** el TTL se fija a 0 al firmar, porque baja en cada
-salto y si entrara en la preimagen cualquier paquete reenviado una sola vez
-llegaria con firma invalida.
+1. **La intermitencia del `msg2`** (§3.1). Alternar identidades en ejecuciones
+   seguidas. Barato, y si es la identidad persistida, afecta a cualquier
+   automatización posterior.
+2. **El servidor GATT.** No implementado. La app nos descubre, conecta y responde
+   sobre la conexión que **nosotros** abrimos, así que el lado central basta para
+   este alcance. Si algún día hace falta para que la app nos encuentre sin que
+   nosotros iniciemos, ahí sí.
+3. **Qué produce `m` y `data` en `REQUEST_SYNC`** (§3.8). No bloquea nada.
+4. **El `MESSAGE` de 72 B de `0xff`** (§3.7). No bloquea nada.
+5. **`REQUEST_SYNC` sin entender.** La app lo manda pidiendo cosas; no sabemos qué
+   quiere ni si hay que contestar. Al día de la sesión completa puede empezar a
+   importar.
 
-**Orden de trabajo, con tests antes que hardware** (§6, punto 12):
+### Lo que **no** se debe rehacer
 
-1. Escribir `msg1` de Noise XX con la clave de la identidad propia.
-2. Test con vector conocido: comprobar byte a byte contra Cacophony.
-3. Enviarlo como `NOISE_HANDSHAKE` en un `smoke_ble` y ver si la app contesta
-   con `NOISE_ENCRYPTED`.
-
-### Despues: los problemas abiertos
-
-1. **Los 64 bytes que `packet.py` llama firma** (§3.2bis). Es lo mas util: se
-   sabe donde esta y cuanto mide, pero no valida como Ed25519, cambia en cada
-   announce con el payload identico, y la app no activa `HAS_SIGNATURE`.
-2. **Los 72 bytes de `0xff`** (§3.3). Candidatos: `Special recipient IDs` en
-   `BinaryProtocol.kt:32`, o relleno deliberado.
-3. **El `MESSAGE` de 4 bytes** que rechazamos. ¿Se sale la app de spec o nuestro
-   `MIN_PAYLOAD_SIZE = 13` es demasiado estricto?
-4. **`REQUEST_SYNC` con `m = 384`** (§3.2ter). No se sabe que lo fija.
-
-### El servidor GATT: **no** es lo siguiente
-
-Se dejaria como paso siguiente porque es lo que falta por la lista de
-piezas, pero **hace falta para el primer hito ya se ha comprobado que no**: la
-app nos escribio por la conexion que nosotros abrimos.
-
-Si algun dia hace falta (por ejemplo, si la app deixa de poder escribirnos), no
-hay atajo: bleak 3.0.2 no puede ser peripheral en Linux, asi que habria que
-implementarlo a mano con `org.bluez.GattManager1`, `GattService1` y
-`GattCharacteristic1`, igual que el anuncio. Tests de formato primero: rutas de
-objeto, firmas D-Bus, nombres de interfaz.
-
----
+- El `msg1` de 32 B. Correcto, y verificado por el Poly1305 del `msg2`.
+- El `msg2` de 96 B. Correcto, y verificado descifrándolo.
+- El `msg3` de 64 B. Correcto, y `split()` funciona.
+- `should_pad_for_ble()`. Se dejó como está a pesar de la contradicción con el
+  tráfico capturado: seguir el código es lo verificable. Ver §3.5.
 
 ## 6. Decisiones que **no** conviene re-litigar
 
@@ -723,6 +604,40 @@ objeto, firmas D-Bus, nombres de interfaz.
     `tests/test_tamanos_handshake.py` existe para que las tres cuentas
     erroneas no puedan volver a aparecer.
 
+20. **Un nombre de distribución no es un nombre de módulo.** La
+    distribución en PyPI es `noiseprotocol`; el módulo que instala es `noise`, y
+    lo que se importa es `noise.noise_protocol`. Preguntar por
+    `find_spec("noiseprotocol")` devuelve `None` **siempre**, con la
+    distribución instalada. Costó una ida y vuelta al host, y `pip` decía
+    "already satisfied" mientras el script decía que no estaba: los dos
+    tenían razón.
+21. **Un informe que no puede fallar no es un informe.** Decir "leído sin error"
+    cuando lo que pasó fue que **no se intentó descifrar** es peor que
+    callarse: un Poly1305 que nunca se comprueba no puede fallar, y eso se lee
+    como una prueba. Cuando una comprobación se hace con la sesión en mal
+    estado, el fallo tiene que ser **visible en la salida**, no en una ausencia
+    de error.
+22. **Antes de descartar algo por "no se puede", comprobar si es verdad.** La
+    afirmación "el `msg2` no entrega clave estática" se escribió sin el motor
+    instalado, así que `read_message` **nunca se ejecutó**. Era una afirmación
+    sobre algo no medido, y mantuvo el problema "abierto" días. Lo que sí era
+    verdad: `read_handshake` necesita el `msg1` de la misma sesión, y eso solo
+    ocurre en el proceso que lo mandó.
+23. **Un flag que no hace lo que su nombre indica es una trampa.** `--nickname`
+    no crea una identidad nueva: si el fichero existe, gana y el flag se ignora
+    **en silencio**. Un flag cuyo nombre sugiere un cambio y no lo hace es peor
+    que no tenerlo. Ahora avisa.
+24. **La respuesta no esperada no es un fallo.** No llegó ningún
+    `NOISE_ENCRYPTED` tras el handshake, y la explicación fácil —"algo
+    falló" — era falsa: en Noise XX el tercer mensaje no tiene respuesta, y la
+    app solo manda cifrado cuando tiene algo cifrado que decir. **Anotarlo como
+    problema sería inventarse un problema.**
+25. **Derivar y medir son cosas distintas.** La cuenta 32/96/64 sale del
+    código de la app; medirla con nuestro motor demuestra que el **nuestro**
+    coincide con el suyo. Lo primero no basta: una suma correcta sobre bytes
+    ajenos no prueba que el cifrado sea el nuestro. `TestTamanosMedidos` monta
+    el handshake entero por eso.
+
 ## 7. Notas de estilo
 
 - La documentación es en español y explica **por qué**, no sólo qué.
@@ -732,3 +647,8 @@ objeto, firmas D-Bus, nombres de interfaz.
 - Los tests llevan nombre descriptivo en español y, cuando cubren un caso
   raro, el motivo por el que ese caso importa.
 - Un descarte o un rechazo **lleva el motivo registrado**, no falla en silencio.
+- Una afirmación sobre algo **no medido** se marca como tal, o no se escribe. Ese
+  es el origen de la lección 22.
+- Nada de cálculos sobre bytes transcritos a mano desde el terminal. Si hay que
+  mirar bytes, se leen del fichero. Una transcripción con un solo carácter mal da
+  un número plausible y falso.
