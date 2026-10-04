@@ -304,6 +304,28 @@ class TestEstadoDeNoiseprotocol(unittest.TestCase):
         self.assertIn("no está", motivo)
         self.assertIn("pip install", motivo)
 
+    def test_el_motivo_dice_donde_ha_mirado(self):
+        """Un "no esta" sin decir donde obliga a una ida y vuelta.
+
+        Paso el 2026-10-05: `pip` decia "already satisfied (0.3.1)" y el script
+        decia que el paquete no estaba. Los dos tienen razon y solo se arbitra
+        con la version del interprete y la ruta que se ha mirado, asi que el
+        motivo tiene que traerlas.
+        """
+        ok, motivo = probe._estado_noiseprotocol()
+        if ok:
+            self.skipTest("noiseprotocol esta en esta maquina")
+        self.assertIn("intérprete:", motivo)
+        self.assertIn("versión:", motivo)
+        self.assertIn("buscando en:", motivo)
+
+    def test_el_motivo_dice_como_comprobar_el_import(self):
+        """El motivo debe decir como comprobarlo, no solo que no lo encuentra."""
+        ok, motivo = probe._estado_noiseprotocol()
+        if ok:
+            self.skipTest("noiseprotocol esta en esta maquina")
+        self.assertIn("noiseprotocol.__file__", motivo)
+
     def test_el_camino_de_paquete_roto_esta_escrito(self):
         """Que exista una rama para "está pero no importa".
 

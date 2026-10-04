@@ -98,9 +98,25 @@ def _estado_noiseprotocol() -> tuple[bool, str]:
         return False, f"no se puede inspeccionar: {type(exc).__name__}: {exc}"
 
     if spec is None:
+        # Un "no está" sin decir dónde se ha mirado obliga a una ida y vuelta.
+        # Pasó el 2026-10-05: `pip` decía "already satisfied (0.3.1)" y el
+        # script decía que no estaba. Los dos tienen razón, y solo se
+        # arbitra con la versión del intérprete y la ruta que está mirando.
+        import sys
+
+        donde = [p for p in sys.path if "site-packages" in p or "dist-packages" in p]
         return False, (
-            "el paquete no está en este intérprete. "
-            "Instálalo con: ./.venv/bin/pip install -r requirements.txt"
+            "el paquete no está en este intérprete.\n"
+            f"      intérprete: {sys.executable}\n"
+            f"      versión:     {sys.version.split()[0]}\n"
+            f"      buscando en:  {donde or ['(ninguna ruta site-packages)']}\n"
+            "      Si `pip` dice lo contrario, casi siempre es que `pip` y "
+            "`python`\n"
+            "      son de sitios distintos. Compruébalo con:\n"
+            "        ./.venv/bin/python -c \"import noiseprotocol; "
+            "print(noiseprotocol.__file__)\"\n"
+            "      y lee el traceback si falla. Si de verdad falta:\n"
+            "        ./.venv/bin/pip install -r requirements.txt"
         )
 
     # Existe. Ahora, ¿importa?
