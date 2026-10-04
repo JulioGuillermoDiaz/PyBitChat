@@ -305,7 +305,101 @@ def _preparar(args, identidad, mac):
     return paquete, sesion
 
 
-async def _escuchar_handshake(cliente, car, args, identidad, recibidos) -> int:
+def _leer_msg2(msg2: bytes, sesion, args) -> None:
+    """Lee el `msg2` con la sesión viva y dice qué sale.
+
+    ## Por qué aquí y no en `probe_msg2.py`
+
+    Descifrar el `msg2` exige la clave efímera **privada** del `msg1` que la app
+    recibió. Esa solo existe en el proceso que lo mandó. Un script posterior
+    sobre la captura no la tiene, por mucho que `noiseprotocol` esté
+    instalada.
+
+    `probe_msg2.py` lo intentó y por eso imprimía `leído sin error, carga
+    útil: 64 B`: había leído el `msg2` sin escribir el `msg1`, el motor se
+    comía el token `E` y los 64 B de cola quedaban sin descifrar. Al no haber
+    clave, un Poly1305 que nunca se comprueba no puede fallar.
+
+    ## Los tres desenlaces, y todos se distinguen
+
+    | Carga útil | Qué ha pasado |
+    |---|---|
+    | 0 B | el motor consumió `[e, ee, s, es]`. Es el caso bueno |
+    | 64 B | consumió solo `[e]`: el `msg1` no llegó a escribirse |
+    | error al leer | el Poly1305 no validó: el `ck` no es el nuestro |
+
+    | Resultado | Consecuencia |
+    |---|---|
+    | 0 B y la clave es la de `--noise-public` | el `msg3` con criterio |
+    | 0 B y la clave es otra | el tag valida pero no es su identidad |
+    | error | el `ck` derivado de nuestro `msg1` no es el suyo |
+    """
+    from pybitchat.protocol.identity import peer_id_from_noise_key
+
+    print()
+    print("  --- leyendo el msg2 con la sesión viva ---")
+    if sesion is None:
+        print("    no hay sesión: el handshake se mandó sin ella.")
+        return
+    try:
+        carga = sesion.read_handshake(msg2, payload_size=0)
+    except Exception as exc:
+        print(f"    ERROR al leer: {type(exc).__name__}: {exc}")
+        print("    El Poly1305 no validó. O el `ck` derivado de nuestro `msg1`")
+        print("    no es el que la app usó, o el `msg2` no es XX con ChaChaPoly.")
+        return
+
+    if carga:
+        print(f"    carga útil: {len(carga)} B")
+        print()
+        print("    Debería ser **0 B**. Si no lo es, el motor no consumió el")
+        print("    patron de `msg2` y lo de la cola va sin descifrar: no ha")
+        print("    podido fallar porque no se ha intentado.")
+        if len(carga) == len(msg2) - 32:
+            print()
+            print("    64 = 96 - 32: solo se ha comido el token `E`. Pasa cuando")
+            print("    el `msg1` no se escribió, y el `msg1` sí se escribió.")
+            print("    Es un bug de quien llama, no del protocolo.")
+        return
+
+    remoto = sesion.remote_static_public
+    print("    leído. carga útil: 0 B  <- lo esperado")
+    print(f"    remote_static_public: {remoto.hex() if remoto else None}")
+    if not remoto:
+        print()
+        print("    El tag validó pero la clave estática no quedó puesta. Con el")
+        print("    token `S` presente no debería pasar.")
+        return
+
+    esperado = args.noise_public
+    print()
+    if esperado is None:
+        print("    Pasa --noise-public para compararla con la de la app.")
+        return
+    igual = remoto == esperado
+    print(f"    TLV 0x02 del announce  {esperado.hex()}")
+    print(f"    clave del msg2         {remoto.hex()}")
+    print(f"    -> {'IGUAL' if igual else 'DISTINTA'}")
+    if not igual:
+        print()
+        print("    El tag validó y la clave no es la suya. Habría que mirar si")
+        print("    el `msg2` trae otro token, o si la app usa una clave estática")
+        print("    distinta para el handshake que para el announce.")
+        return
+
+    pid = peer_id_from_noise_key(remoto)
+    print(f"    peer_id derivado:      {pid.hex()}")
+    if args.peer_id is not None:
+        print(f"    peer_id de la app:      {args.peer_id.hex()}")
+        print(f"    -> {'IGUAL' if pid == args.peer_id else 'DISTINTO'}")
+    print()
+    print("    La cadena de derivación coincide con la de la app. El `msg3` se")
+    print("    puede escribir con criterio, sin adivinar.")
+
+
+async def _escuchar_handshake(
+    cliente, car, args, identidad, recibidos, sesion=None
+) -> int:
     """Escucha la respuesta de la app a nuestro `msg1`.
 
     ## No responde. Es deliberado.
@@ -326,7 +420,11 @@ async def _escuchar_handshake(cliente, car, args, identidad, recibidos) -> int:
     | `NOISE_HANDSHAKE` de 96 B | la app procesó nuestro `msg1` |
     | `NOISE_ENCRYPTED` (`0x11`) | la sesión está cifrada |
 
-    Para investigar el `msg2`: `tools/probe_msg2.py`.
+    ## Lo que sí hace además: leerlo
+
+    `probe_msg2.py` **no** puede descifrar el `msg2`: le falta la clave efímera
+    privada del `msg1`, que solo existía en el proceso que lo mandó. Aquí está
+    la sesión viva, así que este es el sitio donde se lee. Ver `_leer_msg2`.
     """
     print(f"\nescuchando la respuesta hasta {args.segundos} s…")
     await asyncio.sleep(args.segundos)
@@ -341,10 +439,7 @@ async def _escuchar_handshake(cliente, car, args, identidad, recibidos) -> int:
             print(f"\n  respuesta de la app: NOISE_HANDSHAKE de "
                   f"{len(paquete.payload)} B")
             print(f"    payload = {paquete.payload.hex()}")
-            print()
-            print("    El `msg3` NO se envía: falta por saber el formato del")
-            print("    `msg2` (ver tools/probe_msg2.py). Se responds con el")
-            print("    formato de XX canónico a ciegas.")
+            _leer_msg2(paquete.payload, sesion, args)
     if vistos == 0:
         print("\n  no llegó nada. Causas, en orden:")
         print("   - Sin --peer-id el paquete se descartó en silencio.")
@@ -399,9 +494,9 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
     print("  enviado")
 
     if args.handshake:
-        return await _escuchar_handshake(cliente, car, args, identidad, recibidos)
-
-    print(f"\nescuchando {args.segundos} s…")
+        return await _escuchar_handshake(
+            cliente, car, args, identidad, recibidos, sesion
+        )
     await asyncio.sleep(args.segundos)
 
     # Se guarda lo recibido **siempre**, aunque el script termine bien. Los

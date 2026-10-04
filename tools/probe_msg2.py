@@ -352,76 +352,67 @@ def probar_read(
     peer_id_remoto: bytes | None = None,
     noise_remoto: bytes | None = None,
 ) -> None:
-    """Intenta leer el `msg2` con la identidad real y dice qué queda puesto.
+    """Explica por qué el `msg2` **no** se puede descifrar desde aquí.
 
-    ## Contra quién se compara
+    ## Lo que pasó el 2026-10-05
 
-    La clave que sale de los bytes 32..63 es **de la app**, así que lo que
-    tiene que comprobar es contra **la app**. Compararla contra nuestro propio
-    `peer_id` daria siempre `False` y no diría nada: era lo que hacia la
-    versión anterior.
+    Esta función creaba una sesión nueva y leaba el `msg2` directamente. Salía:
 
-    Por eso hace falta `--peer-id` y `--noise-public`: son los del announce de la
-    app, no los nuestros. Sin ellos el informe dice la clave y el `peer_id` que
-    deriva, pero no puede afirmar si es el esperado.
+        leído sin error. carga útil: 64 B
+        remote_static_public: None
+
+    Las dos líneas son síntomas del mismo error: **nunca se escribió el `msg1`**.
+
+    ## Por qué eso rompe todo
+
+    `noiseprotocol` no lleva un contador de mensajes: lleva una lista de
+    patrones, uno por mensaje, y cada `read_message` hace `pop(0)` del primero
+    (`noise/state.py:362`). `PatternXX.tokens` es:
+
+        [[e], [e, ee, s, es], [s, se]]
+
+    El `msg1` se lleva el primero. Sin `msg1` escrito, el `pop(0)` se come
+    `[e]`, se procesa **un** token, y los 64 bytes restantes se quedan de carga
+    útil. Sin `mix_key` no hay clave, así que ese tramo ni se intenta
+    descifrar: sale tal cual. De ahí el "leído sin error" — no lee nada y
+    por eso no puede fallar.
+
+    ## Y aunque se escribiera un `msg1` nuevo, no serviría
+
+    Descifrar el `msg2` real exige la clave efímera **privada** del `msg1` que la
+    app recibió de verdad. Esa solo existía en el proceso que lo mandó, y el
+    proceso se terminó. No hay forma de recuperarla de la captura.
+
+    Así que la comprobación **no puede** hacerse con un fichero. Vive en
+    `smoke_ble.py`, que es quien tiene la sesión viva justo después de enviar.
+
+    Lo que sí se puede decir desde aquí es la **forma**: si los 96 B se
+    reparten como `e` + `s` cifrada + tag. Y eso ya lo dice `desglosar`.
     """
-    print("\n--- read_handshake con la identidad real ---")
+    print("\n--- por qué no se descifra aquí ---")
     ok, motivo = _estado_noiseprotocol()
     if not ok:
         # Se dice aquí, y no antes, para que el desglose de arriba ya haya salido.
-        print(f"  omitido: {motivo}")
-        print("  Los pasos anteriores no necesitan la librería.")
-        return
-
-    sesion = HandshakeSession(
-        initiator=True, static_private=identidad.noise_private
-    )
-    try:
-        carga = sesion.read_handshake(msg2, payload_size=0)
-        print(f"  leído sin error. carga útil: {len(carga)} B")
-    except Exception as exc:
-        print(f"  ERROR al leer: {type(exc).__name__}: {exc}")
-        print("  Si falla aquí, el problema es el descifrado, no la identidad.")
-        return
-
-    remoto = sesion.remote_static_public
-    print(f"  remote_static_public: "
-          f"{remoto.hex() if remoto else 'None'}")
-    if not remoto:
+        print(f"  omitido ademas porque: {motivo}")
         print()
-        print("  La clave estática remota NO quedó puesta, y eso no debería")
-        print("  pasar: el tag Poly1305 validó y el token `S` es el único que")
-        print("  la lleva. Dos candidatos:")
-        print("   - `noiseprotocol` no expone `rs` hasta el `split()`. Se")
-        print("     comprueba el estado interno de la sesion tras el read.")
-        print("   - el `S` se descifró pero se guardó en otro sitio.")
-        return
 
-    pid = peer_id_from_noise_key(remoto)
-    print(f"  peer_id derivado de esa clave: {pid.hex()}")
+    print("  El motor estaría disponible, pero este script **no puede**")
+    print("  descifrar el msg2 de todos modos:")
     print()
-    print("  Comparado con la app, que es lo que tiene que salir:")
-    if noise_remoto is not None:
-        igual = remoto == noise_remoto
-        print(f"    TLV 0x02 del announce  {noise_remoto.hex()}")
-        print(f"    clave descifrada       {remoto.hex()}")
-        print(f"    -> {'IGUAL' if igual else 'DISTINTA'}")
-        if not igual:
-            print()
-            print("    El descifrado funcionó pero la clave no es la suya. Eso")
-            print("    apuntaría a que el `msg2` no lleva su `S`, o a que el")
-            print("    `ck` no coincide y el tag validó por casualidad, que es")
-            print("    muy improbable.")
-            return
-    if peer_id_remoto is not None:
-        print(f"    peer_id de la app      {peer_id_remoto.hex()}")
-        print(f"    derivado de la clave   {pid.hex()}")
-        print(f"    -> {'IGUAL' if pid == peer_id_remoto else 'DISTINTO'}")
-    else:
-        print("    (pasa --peer-id y --noise-public para comparar de verdad)")
+    print("   - hace falta el msg1, para que la sesion consuma el patron")
+    print("     correcto ([e, ee, s, es] en vez de [e])")
+    print("   - y hace falta la clave efímera privada de ESE msg1, que")
+    print("     solo existía en el proceso que lo mandó")
     print()
-    print("  Si la clave sale igual al TLV 0x02, la cadena de derivación")
-    print("  coincide y se puede escribir el msg3 de 64 B con criterio.")
+    print("  Antes de esto, el informe de aquí decía 'leído sin error,")
+    print("  carga útil: 64 B' y 'remote_static_public: None'. Las dos cosas")
+    print("  eran síntomas de leer el msg2 sin haber escrito el msg1:")
+    print("  se come el patron [e], los 64 B de cola quedan sin descifrar,")
+    print("  y por eso no hay error. 'Leído sin error' no significaba nada.")
+    print()
+    print(f"  Para verlo de verdad: tools/smoke_ble.py --handshake, que lee el")
+    print(f"  msg2 con la sesión viva. Si la app contesta, dice si la clave")
+    print(f"  estática que trae coincide con --noise-public.")
 
 
 def main() -> int:

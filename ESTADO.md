@@ -309,6 +309,57 @@ Y esto se dejo dicho porque es el tercer fallo del mismo tipo: ir a por una
 hipotesis sin mirar lo que ya se sabia. El 04-oct el handshake **ya funcionaba
 sin announce**, con dos sesiones de evidencia, y eso estaba en este documento.
 
+### 3.5 El `msg2` solo se puede leer en el proceso que lo mandó
+
+Descubierto el 2026-10-05. `probe_msg2.py` contestaba siempre que no:
+
+    leído sin error. carga útil: 64 B
+    remote_static_public: None
+
+Las dos líneas eran síntomas del mismo error: **nunca se escribió el `msg1`**.
+
+### La causa
+
+`noiseprotocol` no lleva un contador de mensajes: lleva una lista de patrones, uno
+por mensaje, y cada `read_message` hace `pop(0)` del primero
+(`noise/state.py:362`). `PatternXX.tokens` es:
+
+    [[e], [e, ee, s, es], [s, se]]
+
+El `msg1` se lleva el primero. Sin `msg1` escrito, el `pop(0)` se come `[e]`, se
+procesa **un** token, y los 64 B restantes quedan de carga útil. Sin `mix_key` no
+hay clave, así que ese tramo ni se intenta descifrar: sale tal cual.
+
+De ahí el "leído sin error". **No leía nada, y por eso no puede fallar.**
+
+### Y ni siquiera escribiendo un `msg1` nuevo serviría
+
+Descifrar el `msg2` real exige la clave efímera **privada** del `msg1` que la app
+recibió de verdad, y esa solo existía en el proceso que lo mandó. El proceso
+se terminó; la captura no la tiene.
+
+Por eso la comprobación **no puede** hacerse con un fichero. Vive en
+`smoke_ble.py`, que es quien tiene la sesión viva justo después de enviar.
+
+### Los cuatro desenlaces, todos distinguibles por la salida
+
+| Salida | Qué ha pasado |
+|---|---|
+| `carga útil: 0 B` + `IGUAL` | la cadena de derivación coincide con la de la app |
+| `carga útil: 0 B` + `DISTINTA` | el tag validó pero no es su identidad |
+| `carga útil: 64 B` | el motor solo consumió `[e]`: bug de quien llama |
+| `ERROR al leer` | el Poly1305 no validó: el `ck` no es el nuestro |
+
+### Archivos
+
+- `tools/smoke_ble.py`: `_leer_msg2()`, y `_escuchar_handshake` recibe la sesión.
+- `tools/probe_msg2.py`: ya no intenta descifrar, y **explica por qué no puede**.
+- `tests/test_msg2_en_proceso.py`: la firma del error, 9 tests.
+- `tests/test_leer_msg2.py`: los cuatro desenlaces sin Bluetooth, 18 tests.
+
+El `msg3` **sigue sin enviarse**. Con la clave a la vista se podría escribir, pero
+es otra decisión y no se toma sola.
+
 ## 4. Cómo arrancar
 
 ### En el host Linux (donde está el Bluetooth)

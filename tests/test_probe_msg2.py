@@ -246,19 +246,44 @@ class TestSinNoiseProtocol(unittest.TestCase):
         self.assertIn("ok", r.stdout)
 
     def test_probar_read_no_revienta_sin_la_libreria(self):
-        """`probar_read` es la única parte que la necesita: con la librería
-        ausente avisa, no lanza."""
+        """Sigue sin lanzar aunque el motor no este: el informe entero vale.
+
+        Lo que ahora dice es que aqui **no** se puede descifrar, con o sin
+        motor, asi que la comprobacion va en `smoke_ble.py`.
+        """
         import io
         from contextlib import redirect_stdout
 
-        ident = Identity.generate("probe")
         buf = io.StringIO()
         with redirect_stdout(buf):
-            probe.probar_read(bytes(96), ident)
+            probe.probar_read(bytes(96), None)
+        self.assertIn("no puede", buf.getvalue())
+
+    def test_probar_read_dice_que_toca_smoke_ble(self):
+        """El informe tiene que senalizar donde esta la comprobacion de verdad."""
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            probe.probar_read(bytes(96), None)
+        self.assertIn("smoke_ble.py", buf.getvalue())
+
+    def test_probar_read_no_promete_que_descifra(self):
+        """Ya no puede decir 'leido sin error': era mentira.
+
+        Decirlo era peor que callarse: un Poly1305 que nunca se comprueba no
+        puede fallar, y eso se leia como una prueba.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            probe.probar_read(bytes(96), None)
         salida = buf.getvalue()
-        # O se omitió por falta de librería, o se leyó. Ambas son válidas; lo
-        # que no vale es una excepción.
-        self.assertIn("read_handshake", salida)
+        self.assertNotIn("leído sin error.", salida)
+
     def test_el_umbral_de_fichero_por_defecto_capturas(self):
         """Por defecto mira `capturas/recibido.bin`, que es donde
         `smoke_ble.py` guarda."""
