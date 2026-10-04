@@ -226,6 +226,15 @@ cd ~/PyBitChat && git pull
 
 **Mira el `exit=`, no el texto.** Ver §6, punto 11.
 
+> **Sólo en el host Linux salen los 462 tests sin `skipped=`.** El 2026-10-04
+> fue la primera vez: en la VM de Windows faltan `bleak` y `dbus_fast`, así que
+> 10 tests se saltan y **no comprueban nada**. Contarlos como verdes era el
+> error, y por eso el runner ahora imprime **qué** se salta y por qué.
+>
+> Un `skipped=10` en la VM no es un problema. Un test roto esperándose en el
+> host, sí. Ejecutar la suite completa **allí** antes de dar por buena una
+> jornada.
+
 Si falta el venv:
 ```bash
 sudo apt install -y python3.14-venv build-essential python3-dev
@@ -291,8 +300,9 @@ Opciones útiles de `smoke_ble.py`:
 | `test_dialect.py` | 21 | Constantes Android con `file:line` |
 | `test_dispatch.py` | 19 | Despacho por dialecto y ambigüedad |
 | `test_golden_packets.py` | 19 | Los 21 paquetes reales, byte a byte |
-| `test_bleak_transport.py` | 8 | Transporte real (se salta sin bleak) |
-| **Total** | **450** | 10 saltados = requieren hardware o `dbus_fast` |
+| `test_run_tests.py` | 8 | El runner: informe de saltados, código de salida |
+| `test_bleak_transport.py` | 12 | Transporte real; 6 se saltan sin `bleak` |
+| **Total** | **462** | 0 saltados en Linux; 10 saltados en Windows |
 
 ### Ficheros del proyecto
 
@@ -429,6 +439,15 @@ objeto, firmas D-Bus, nombres de interfaz.
     en la posición 14 del announce no apuntaba a un problema de codificación:
     la posición 14 era exactamente donde empezaba la clave binaria. Los bytes
     dicen cuál es el fallo.
+17. **Un test saltado no es un test verde.** `test_bleak_transport.py` tiene su
+    clase entera bajo `@skipUnless(TIENE_BLEAK)`, y `bleak` no está en la VM de
+    Windows: **6 tests no se ejecutaban nunca aquí** y se contaban como
+    buenos. Cuando por fin corrieron en el host, uno falló a la primera. El
+    runner ahora enumera **qué** se salta y por qué, y `skipped=0` en el host
+    es la señal de que todo está comprobado de verdad.
+18. **La suite completa se ejecuta donde están las dependencias.** La VM sirve
+    para escribir; el host, para verificar. Un fallo de API puede llevar días
+    escondido tras un `skipUnless` sin que nadie lo note.
 
 ---
 
