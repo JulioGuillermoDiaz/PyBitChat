@@ -301,6 +301,101 @@ def _preparar(args, identidad, mac):
     return paquete, None
 
 
+async def _escuchar_handshake(
+    cliente, car, args, identidad, recibidos, limite, sesion
+) -> int:
+    """Escucha el `msg2` de la app y le responde con `msg3`.
+
+    XX son tres mensajes: `-> e`, `<- e, ee, s`, `-> se`. Nosotros mandamos el
+    primero antes de entrar aquí; esta función es la que cierra el patrón.
+
+    Lo que se busca y por qué cada cosa importa:
+
+    | Lo que llega | Significa |
+    |---|---|
+    | `NOISE_HANDSHAKE` de 96 B | la app procesó nuestro `msg1` |
+    | `NOISE_ENCRYPTED` (`0x11`) | **el handshake ya está cerrado** |
+
+    La respuesta va con el **mismo tipo** `0x10`, no con uno de respuesta:
+    "Single handshake type (0x10) with response determined by payload analysis"
+    (`MessageHandler.kt:364`).
+    """
+    from pybitchat.noise.handshake import completar_handshake
+
+    print(f"\nescuchando msg2 hasta {args.segundos} s…")
+    limite_ms = args.segundos * 1000
+    waited = 0.0
+    paso = 0.25
+    procesado = False
+
+    while waited < limite_ms and not procesado:
+        await asyncio.sleep(paso)
+        waited += paso * 1000
+        for datos in list(recibidos):
+            paquete = _primero_inesperado(datos)
+            if paquete is None:
+                continue
+            if paquete.header.raw_type != 0x10:
+                continue
+
+            print(f"\n  msg2 recibido: {len(paquete.payload)} B")
+            try:
+                msg3_paquete, sesion = completar_handshake(
+                    sesion,
+                    identidad,
+                    paquete.payload,
+                    bytes.fromhex(args.peer_id_hex),
+                )
+            except Exception as exc:
+                print(f"  NO se pudo completar el handshake: "
+                      f"{type(exc).__name__}: {exc}")
+                return 1
+
+            print("  clave estática verificada contra el peer_id esperado")
+            print(f"  msg3 = {len(msg3_paquete)} B")
+            if len(msg3_paquete) > limite:
+                print(f"  ERROR: msg3 excede el máximo escribible ({limite} B)")
+                return 1
+            await cliente.write_gatt_char(car, msg3_paquete, response=False)
+            print("  msg3 enviado. handshake cerrado.")
+            print(f"  handshake_hash = {sesion.handshake_hash.hex()}")
+            procesado = True
+            break
+
+    if not procesado:
+        print(f"\nNo llegó msg2 en {args.segundos:g} s.")
+        print("  Causas, en orden de probabilidad:")
+        print("   - Sin --peer-id el paquete se descartó en silencio.")
+        print("   - La app no nos ha descubierto todavía.")
+        print("   - El móvil lleva >15 min sin actividad y no anuncia.")
+
+    print(f"\nescuchando {args.segundos} s más a ver si llega tráfico cifrado…")
+    await asyncio.sleep(args.segundos)
+
+    # Se guardan también los paquetes del handshake: el `msg2` de la app es la
+    # evidencia del último paso, y reenviarlo cuesta un viaje al host.
+    destino = args.guardar
+    _guardar(recibidos, destino)
+    print(f"  {len(recibidos)} paquete(s) guardados en {destino} "
+          f"({destino.stat().st_size} B)")
+
+    return _informe(recibidos)
+
+
+def _primero_inesperado(datos):
+    """Primer paquete legible de un `bytearray` recibido, o `None`.
+
+    Se usa `Packet.from_bytes` en lugar de asumir el formato: así un paquete
+    malformado da `None` y no rompe la sesión.
+    """
+    from pybitchat.protocol.packet import Packet, ProtocolError
+
+    try:
+        return Packet.from_bytes(bytes(datos))
+    except (ProtocolError, IndexError, ValueError):
+        return None
+
+
 async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
     try:
         await cliente._backend._acquire_mtu()
@@ -316,7 +411,7 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
         print("  el teléfono no expone el characteristic de BitChat")
         return 1
 
-    paquete, _sesion = _preparar(args, identidad, mac)
+    paquete, sesion = _preparar(args, identidad, mac)
 
     limite = car.max_write_without_response_size
     if len(paquete) > limite:
@@ -325,6 +420,11 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
         return 1
     await cliente.write_gatt_char(car, paquete, response=False)
     print("  enviado")
+
+    if args.handshake:
+        return await _escuchar_handshake(
+            cliente, car, args, identidad, recibidos, limite, sesion
+        )
 
     print(f"\nescuchando {args.segundos} s…")
     await asyncio.sleep(args.segundos)
@@ -395,6 +495,11 @@ def main() -> int:
     p.add_argument("--peer-id", type=lambda s: bytes.fromhex(s), default=None,
                    help="peer_id de 8 bytes de la app, en hex. Va en "
                         "recipient_id; sin él la app descarta el paquete")
+    args = p.parse_args()
+    # En hexadecimal, para poder pasarlo a `completar_handshake` y comparar
+    # con el `peer_id` derivado. Duplicarlo aquí evita tener que arrastrar el
+    # `bytes` por tres funciones.
+    args.peer_id_hex = args.peer_id.hex() if args.peer_id else None
     p.add_argument("--noise-public", type=lambda s: bytes.fromhex(s),
                    default=None,
                    help="clave Noise pública de 32 bytes de la app, en hex "

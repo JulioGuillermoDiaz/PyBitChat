@@ -32,10 +32,13 @@ sys.path.insert(0, str(ROOT / "src"))
 from pybitchat.noise.handshake import (  # noqa: E402
     MSG1_SIZE,
     TTL_HANDSHAKE,
+    completar_handshake,
     construir_msg1,
     empaquetar,
     iniciar_handshake,
 )
+from pybitchat.noise.session import HandshakeSession  # noqa: E402
+from pybitchat.protocol.identity import peer_id_from_noise_key  # noqa: E402
 from pybitchat.noise.session import NoiseError  # noqa: E402
 from pybitchat.protocol.identity import Identity  # noqa: E402
 from pybitchat.protocol.packet import Packet, ProtocolError  # noqa: E402
@@ -270,6 +273,134 @@ class TestAtajo(unittest.TestCase):
         p = Packet.from_bytes(paquete)
         self.assertNotIn(PEER_APP, p.payload)
         self.assertIn(PEER_APP, paquete)
+
+
+class TestCompletarHandshake(unittest.TestCase):
+    """El tercer mensaje de XX: el que cierra el patrón.
+
+    Verificado el 2026-10-04: la app responde a nuestro `msg1` con 96 B, y
+    `HandshakeSession` como *responder* produce también 96 B. Mismo tamaño = la
+    configuración Noise es la misma: perfil, tag y orden de tokens.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ident = Identity.generate("pybitchat-probe")
+        #: Clave privada fija de la "app" simulada. Se usa para que
+        #: `HandshakeSession`derive su clave pública correctamente.
+        #:
+        #: Antes se manipulaba `s.public_bytes` a mano y el `msg2` no lo podía
+        #: leer ni el iniciador: la clave pública es el resultado de
+        #: `X25519BasepointMult`, y cambiarla a posteriori deja la sesión en un
+        #: estado que no corresponde a ninguna clave real. Con la privada
+        #: verdadera, las dos mitades encajan desde el principio.
+        cls.app_priv = b"\x22" * 32
+        #: `peer_id` derivado de la clave de la app simulada. **No** se escribe a
+        #: mano: el test tiene que usar el mismo criterio que
+        #: `completar_handshake`. Con una constante fija, el test comprobaría que
+        #: el código hace lo que el test dice, en vez de lo que el código dice.
+        cls.peer_app = peer_id_from_noise_key(
+            HandshakeSession(
+                initiator=False,
+                static_private=cls.app_priv,
+                remote_static_public=b"\x33" * 32,
+            ).static_public
+        )
+
+    def _par(self):
+        """Devuelve `(iniciador, app_responder, msg2)`.
+
+        El llamante decide hasta dónde avanzar, porque cada test necesita un
+        punto distinto de la conversación.
+        """
+        ident = self.ident
+        ini = HandshakeSession(initiator=True, static_private=ident.noise_private)
+        app = HandshakeSession(
+            initiator=False,
+            static_private=self.app_priv,
+            remote_static_public=ident.noise_public,
+        )
+        msg1 = ini.write_handshake(b"")
+        app.read_handshake(msg1)
+        msg2 = app.write_handshake(b"")
+        return ini, app, msg2
+
+    def test_el_msg2_de_la_app_mide_lo_que_producimos(self):
+        """El dato que cerró la duda: 96 B de un lado y de otro.
+
+        Los 96 B del `msg2` real de la app se transcribieron del hexdump del
+        2026-10-04. Que nuestra implementación produzca el mismo tamaño es lo
+        que dice que el perfil, la etiqueta y el orden de tokens coinciden.
+        """
+        ini, _app, msg2 = self._par()
+        self.assertEqual(len(msg2), 96)
+
+    def test_completar_cierra_el_patron(self):
+        ini, _app, msg2 = self._par()
+        msg3_paquete, sesion = completar_handshake(
+            ini, self.ident, msg2, self.peer_app, ttl=6
+        )
+        p = Packet.from_bytes(msg3_paquete)
+        self.assertEqual(p.header.raw_type, int(MessageType.NOISE_HANDSHAKE))
+        # msg3 va dirigido a la app, que es quien nos respondió.
+        self.assertEqual(p.recipient_id, self.peer_app)
+        self.assertTrue(sesion.complete)
+
+    def test_verifica_la_clave_estatica_contra_el_peer_id(self):
+        """Es la única comprobación criptográfica de identidad disponible.
+
+        Sin ella, cualquier peer podría presentar una clave y hacerse pasar por
+        otro: el `peer_id` que da `sha256(clave)[:8]` es lo único que no
+        podemos comprobar por nosotros mismos.
+        """
+        ini, _app, msg2 = self._par()
+        otro = bytes.fromhex("00112233445566ff")
+        with self.assertRaises(NoiseError) as ctx:
+            completar_handshake(ini, self.ident, msg2, otro)
+        self.assertIn("peer_id", str(ctx.exception))
+
+    def test_el_peer_id_correcto_pasa(self):
+        """El mismo caso, pero con el peer_id que sí corresponde."""
+        ini, _app, msg2 = self._par()
+        _, sesion = completar_handshake(ini, self.ident, msg2, self.peer_app)
+        self.assertTrue(sesion.complete)
+
+    def test_el_peer_id_se_deriva_de_la_clave_estatica_del_msg2(self):
+        """Lo que hace la comprobación, medido: el `peer_id` del otro sale de
+        su clave Noise, y no de lo que el paquete diga."""
+        ini, app, msg2 = self._par()
+        _, sesion = completar_handshake(ini, self.ident, msg2, self.peer_app)
+        # Lo que la sesión dedujo del msg2 debe ser la clave de la app, y su
+        # `peer_id` el mismo que calculamos aparte.
+        self.assertEqual(sesion.remote_static_public, app.static_public)
+        self.assertEqual(peer_id_from_noise_key(sesion.remote_static_public),
+                         self.peer_app)
+
+    def test_ambos_lados_coinciden_en_el_handshake_hash(self):
+        """Si los hashes difieren, las claves derivadas no son las mismas y el
+        transporte fallaría más tarde, con un error que no señala el origen."""
+        ini, app, msg2 = self._par()
+        msg3 = app.write_handshake(b"")
+        ini.read_handshake(msg2)
+        ini.read_handshake(msg3)
+        self.assertEqual(ini.handshake_hash, app.handshake_hash)
+
+    def test_un_msg2_corrupto_se_rechaza(self):
+        """Bytes alterados: la etiqueta Poly1305 tiene que detectarlo."""
+        ini, _app, msg2 = self._par()
+        roto = bytearray(msg2)
+        roto[-1] ^= 0xFF
+        with self.assertRaises(NoiseError):
+            completar_handshake(ini, self.ident, bytes(roto), self.peer_app)
+
+    def test_msg3_tambien_lleva_recipient(self):
+        """La respuesta va dirigida, igual que el msg1. Si no, la app la
+        descarta igual que el primero (`MessageHandler.kt:375`)."""
+        ini, _app, msg2 = self._par()
+        paquete, _ = completar_handshake(ini, self.ident, msg2, self.peer_app)
+        p = Packet.from_bytes(paquete)
+        self.assertEqual(p.recipient_id, self.peer_app)
+        self.assertTrue(p.header.flags & PacketFlags.HAS_RECIPIENT)
 
 
 class TestSmokeBle(unittest.TestCase):

@@ -82,7 +82,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..noise.session import PROTOCOL_NAME, HandshakeSession, NoiseError
-from ..protocol.identity import Identity
+from ..protocol.identity import Identity, peer_id_from_noise_key
 from ..protocol.packet import Packet, PacketHeader, pkcs7_pad_to_bucket
 from ..protocol.types import MessageType, PacketFlags, should_pad_for_ble
 
@@ -212,9 +212,77 @@ def iniciar_handshake(
     return paquete, sesion
 
 
+def completar_handshake(
+    sesion: HandshakeSession,
+    identidad: Identity,
+    msg2: bytes,
+    peer_id_remoto: bytes,
+    *,
+    ttl: int = TTL_HANDSHAKE,
+    verificar_peer_id: bool = True,
+) -> tuple[bytes, HandshakeSession]:
+    """Procesa `msg2` y produce `msg3`. Es el último mensaje de XX.
+
+    XX son tres: `-> e`, `<- e, ee, s`, `-> se`. Mandamos el primero, la app
+    contesta con el segundo, y éste cierra.
+
+    ## Tras `msg2` la sesión **no** está completa, y es lo normal
+
+    Medido: `message_patterns` del initiator va 3 → 2 → 1. Queda `-> se`, que es
+    este `msg3`. `complete` sólo pasa a `True` después de escribirlo.
+
+    ## `msg2` son 96 B
+
+    Verificado contra la app real el 2026-10-04: su respuesta al `msg1` mide
+    96 B, y `HandshakeSession` como *responder* produce también 96 B. Mismo
+    tamaño = misma configuración Noise: perfil, tag y orden de tokens.
+
+    El desglose no está verificado token a token, así que **no** se afirma aquí:
+    96 = 32 + 48 + 16 encaja con `e` + `ee` + parte de `s`, pero también con
+    otras reparticiones. Lo que se sabe es que el tamaño coincide, y por eso la
+   ライブラリ y la app hablan el mismo idioma.
+
+    ## El `peer_id` se verifica contra la clave
+
+    `msg2` incluye la clave estática de la app, que ya sustrae y comprueba. Es
+    la **única** comprobación criptográfica de la identidad que tenemos: si
+    `sha256(clave)[:8]` no da el `peer_id` que esperábamos, el mensaje no es de
+    quien creemos y no hay que seguir.
+
+    Por eso `verificar_peer_id` es `True` por defecto. Desactivarlo es para
+    pruebas, no para producción: sin esta comprobación, cualquier peer podría
+    hacer pasar su clave por otra.
+    """
+    sesion.read_handshake(msg2, payload_size=0)
+
+    # NO se exige `sesion.complete` aquí. XX tiene **tres** mensajes, y
+    # `message_patterns` del initiator va 3 → 2 → 1: queda `-> se`, que es este
+    # `msg3`. Exigir `complete` sería pedir que un patrón de tres cerrara en
+    # dos. `complete` sólo pasa a `True` tras escribir el msg3.
+    if verificar_peer_id:
+        remote = sesion.remote_static_public
+        if remote is None:
+            raise NoiseError(
+                "msg2 no trajo clave estática remota: no se puede verificar "
+                "quién es el otro lado"
+            )
+        calculado = peer_id_from_noise_key(remote)
+        if calculado != peer_id_remoto:
+            raise NoiseError(
+                f"la clave estática del msg2 da peer_id {calculado.hex()} y "
+                f"esperábamos {peer_id_remoto.hex()}. El mensaje no es de "
+                f"ese par: no se responde."
+            )
+
+    msg3 = sesion.write_handshake(b"")
+    paquete = empaquetar(msg3, identidad, peer_id_remoto, ttl=ttl)
+    return paquete, sesion
+
+
 __all__ = [
     "MSG1_SIZE",
     "TTL_HANDSHAKE",
+    "completar_handshake",
     "construir_msg1",
     "empaquetar",
     "iniciar_handshake",
