@@ -89,7 +89,17 @@ def leer_paquetes(datos: bytes) -> list[Packet]:
 
 
 def desglosar(msg2: bytes) -> list[str]:
-    """Parte `msg2` según los tokens de XX. Devuelve líneas legibles."""
+    """Parte `msg2` según los tokens de XX. Devuelve líneas legibles.
+
+    El desglose por tokens ** presupone que el patrón es XX canónico. Con un
+    `msg2` que no lo es, las líneas son aritmética sobre una suposición y no
+    dicen nada del formato real.
+
+    Por eso, cuando los tamaños no cuadran, el informe lo dice y **no** presenta
+    el reparto como si fuera el bueno. Un informe que muestra
+    "S -> 16 B" sin avisar de que el patrón no es XX lleva a debuggear un token
+    que no existe.
+    """
     lineas = []
     restante = len(msg2)
     # msg2 de XX = `E, EE, S, ES`
@@ -101,37 +111,64 @@ def desglosar(msg2: bytes) -> list[str]:
     ):
         if restante <= 0:
             break
-        if nombre == "S":
-            # `S` y `ES` van ambos cifrados, pero si no queda sitio para los
-            # dos, que se note en el informe en vez de dar un número falso.
-            lineas.append(f"  {nombre:3} -> {min(largo, restante):3d} B "
-                          f"(quedan {restante} B)")
+        tomado = min(largo, restante)
+        if tomado == largo:
+            lineas.append(f"  {nombre:3} -> {tomado:3d} B (quedan {restante - tomado})")
         else:
-            lineas.append(f"  {nombre:3} -> {min(largo, restante):3d} B "
-                          f"(quedan {restante - min(largo, restante)})")
+            # No queda sitio para el token entero. Se dice explícitamente en
+            # vez de escribir un tamaño que no es real.
+            lineas.append(
+                f"  {nombre:3} -> {tomado:3d} B de {largo} (NO CABE; "
+                f"quedan {restante})"
+            )
         restante -= largo
 
     esperado = LEN_E + 3 * LEN_CIFRADO
+    cuadra = len(msg2) == esperado
     lineas.append("")
     lineas.append(f"  msg2 mide {len(msg2)} B")
     lineas.append(f"  XX canónico E,EE,S,ES mide {esperado} B")
-    lineas.append(f"  -> {'coincide' if len(msg2) == esperado else 'NO coincide'}")
-    if len(msg2) != esperado:
-        lineas.append(f"     diferencia: {len(msg2) - esperado:+d} B")
-        # Una diferencia negativa pequeña es la firma de un token cifrado que
-        # va sin tag, o de uno que va en claro.
-        if len(msg2) < esperado:
-            faltan = esperado - len(msg2)
+    lineas.append(f"  -> {'coincide' if cuadra else 'NO coincide'}")
+    if not cuadra:
+        lineas.append("")
+        lineas.append("  ⚠ El reparto de arriba es aritmética sobre XX canónico,")
+        lineas.append("    y este msg2 NO es XX canónico por tamaño. El")
+        lineas.append("    desglose por tokens **no describe el formato real**.")
+        lineas.append("")
+        diferencia = len(msg2) - esperado
+        lineas.append(f"    diferencia: {diferencia:+d} B")
+        if diferencia < 0:
+            faltan = -diferencia
             lineas.append(
-                f"     faltan {faltan} B. Posibles causas: un token cifrado "
-                f"sin tag (16 B cada uno), o uno que va en claro (32 B)."
+                f"    faltan {faltan} B. Candidatos, sin decidir cuál:"
             )
+            lineas.append(
+                f"     - un token cifrado sin tag: 16 B menos por token "
+                f"({faltan // 16} token/s)"
+            )
+            lineas.append(
+                f"     - un token en claro en vez de cifrado: 16 B menos "
+                f"por token ({faltan // 16} token/s)"
+            )
+            if faltan % 32 != 0:
+                lineas.append(
+                    f"     - {faltan} no es múltiplo de 16 ni de 32: "
+                    f"queda algo más sin explicar"
+                )
     return lineas
 
 
 def probar_read(msg2: bytes, identidad: Identity) -> None:
     """Intenta leer el `msg2` con la identidad real y dice qué queda puesto."""
     print("\n--- read_handshake con la identidad real ---")
+    try:
+        import noiseprotocol  # noqa: F401
+    except ImportError:
+        # Se dice aquí, y no antes, para que el desglose de arriba ya haya salido.
+        print("  omitido: `noiseprotocol` no está instalado, así que no se")
+        print("  puede descifrar. Los pasos anteriores no lo necesitan.")
+        return
+
     sesion = HandshakeSession(
         initiator=True, static_private=identidad.noise_private
     )
@@ -181,14 +218,24 @@ def main() -> int:
     datos = args.fichero.read_bytes()
     print(f"fichero: {args.fichero}  ({len(datos)} B)")
 
+    # `noiseprotocol` sólo hace falta para **descifrar**, no para leer los
+    # paquetes ni desglosar el `msg2`. Comprobarlo al principio y salir con
+    # código 1 tiraba por el suelo un informe que se puede hacer sin ella: la
+    # primera versión hacía exactamente eso, y contestaba "NO INSTALADO" sin
+    # dar el desglose, que es justo el dato que se pedía.
+    #
+    # Se comprueba más abajo, donde se usa, para que la falta se note en su
+    # sitio y no impida el resto.
+    hay_noise = True
     try:
-        import noiseprotocol  # noqa: F401
+        import noiseprotocol
         print(f"noiseprotocol: {getattr(noiseprotocol, '__version__', '?')}")
     except ImportError:
+        hay_noise = False
         print("noiseprotocol: NO INSTALADO")
-        print("  Sin esta librería no se puede leer el msg2. Se instala en el")
-        print("  host Linux; en la máquina donde se escribe el código no está.")
-        return 1
+        print("  Se puede leer y desglosar el msg2 igualmente; sólo falta")
+        print("  el paso de descifrarlo. Se instala con:")
+        print("    ./.venv/bin/pip install -r requirements.txt")
 
     identidad = Identity.cargar_o_crear("pybitchat-probe")
     print(f"identidad:  peer_id={identidad.peer_id_hex}")

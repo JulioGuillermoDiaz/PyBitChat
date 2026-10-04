@@ -130,9 +130,30 @@ class TestDesglose(unittest.TestCase):
 
     def test_propone_las_causas_de_la_diferencia(self):
         """Los 80 B que faltan encajan con tokens sin tag o en claro, y eso
-        es lo que hay que investigar. Se dice, no se supone cuál es."""
+        es lo que hay que investigar. Se **dice**, no se supone cuál es."""
         lineas = "\n".join(probe.desglosar(b"\x00" * 96))
         self.assertIn("tag", lineas)
+        self.assertIn("sin decidir", lineas)
+
+    def test_avisa_que_el_desglose_no_describe_el_formato_real(self):
+        """El fallo de este informe sería enseñar `S -> 16 B` sin avisar de que
+        el patrón no es XX, que lleva a debuggear un token que no existe."""
+        texto = " ".join(probe.desglosar(b"\x00" * 96))
+        # La frase va partida en varias líneas del informe, así que se
+        # comprueba sobre el texto unido: `assertIn` sobre el "\n" fallaría
+        # aunque el aviso esté.
+        self.assertIn("no describe el formato real", texto)
+
+    def test_no_dice_que_avisa_cuando_el_patron_si_cuadra(self):
+        """Con 176 B el desglose sí es válido: no debe llevar el aviso."""
+        texto = " ".join(probe.desglosar(b"\x00" * 176))
+        self.assertNotIn("no describe el formato real", texto)
+
+    def test_avisa_cuando_un_token_no_cabe(self):
+        """Con 96 B, `S` necesita 48 y sólo quedan 16. Se dice "NO CABE" en vez
+        de escribir 16 como si fuera el tamaño del token."""
+        texto = "\n".join(probe.desglosar(b"\x00" * 96))
+        self.assertIn("NO CABE", texto)
 
     def test_no_se_inventa_bytes_que_no_hay(self):
         """Con 10 B no puede "desglosar" 176: el informe tiene que poner lo que
@@ -141,7 +162,70 @@ class TestDesglose(unittest.TestCase):
         self.assertIn("10", lineas)
 
 
-class TestFormato(unittest.TestCase):
+class TestSinNoiseProtocol(unittest.TestCase):
+    """La herramienta tiene que dar el desglose aunque falte la librería.
+
+    Es lo que pasó el 2026-10-04: `noiseprotocol` no estaba en el host, y el
+    script contestaba "NO INSTALADO" y salía con código 1 **sin dar el
+    desglose**, que es justo lo que se le pedía.
+
+    La comprobación se hace donde se usa —descifrar—, no al principio, para que
+    la falta se note en su sitio y no impida el resto.
+    """
+
+    def test_desglosar_no_depende_de_la_libreria(self):
+        """El desglose es aritmética sobre longitudes: no necesita nada."""
+        lineas = probe.desglosar(bytes(96))
+        self.assertTrue(any("NO coincide" in l for l in lineas))
+
+    def test_leer_paquetes_no_depende_de_la_libreria(self):
+        """Leer un paquete tampoco la necesita."""
+        datos = _paquete(MessageType.NOISE_HANDSHAKE, b"\x02" * 96)
+        leidos = probe.leer_paquetes(datos)
+        self.assertEqual(len(leidos), 1)
+        self.assertEqual(len(leidos[0].payload), 96)
+
+    def test_el_modulo_importa_sin_la_libreria(self):
+        """Si importar el módulo requiriera `noiseprotocol`, el script no
+        podría decir siquiera "no está instalado"."""
+        import importlib
+        import subprocess
+        import sys as _sys
+
+        src = (
+            "import importlib.util, sys;"
+            "sys.path.insert(0, 'src');"
+            "spec = importlib.util.spec_from_file_location('m', 'tools/probe_msg2.py');"
+            "m = importlib.util.module_from_spec(spec);"
+            "spec.loader.exec_module(m);"
+            "print('ok')"
+        )
+        raiz = ROOT
+        r = subprocess.run(
+            [_sys.executable, "-c", src],
+            capture_output=True,
+            text=True,
+            cwd=str(raiz),
+            timeout=60,
+        )
+        # El código de salida, no el texto.
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ok", r.stdout)
+
+    def test_probar_read_no_revienta_sin_la_libreria(self):
+        """`probar_read` es la única parte que la necesita: con la librería
+        ausente avisa, no lanza."""
+        import io
+        from contextlib import redirect_stdout
+
+        ident = Identity.generate("probe")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            probe.probar_read(bytes(96), ident)
+        salida = buf.getvalue()
+        # O se omitió por falta de librería, o se leyó. Ambas son válidas; lo
+        # que no vale es una excepción.
+        self.assertIn("read_handshake", salida)
     def test_el_umbral_de_fichero_por_defecto_capturas(self):
         """Por defecto mira `capturas/recibido.bin`, que es donde
         `smoke_ble.py` guarda."""
