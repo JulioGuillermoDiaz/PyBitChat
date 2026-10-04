@@ -131,7 +131,18 @@ verificación de firma re-codifica el paquete, re-comprimir un payload ajeno
 
 ---
 
-## 3. Problemas: uno resuelto, tres abiertos
+## 3. Problemas: dos resueltos, tres abiertos
+
+VERIFICADO el 2026-10-05. El enlace Noise **funciona** hasta el punto en que
+solo falta el ultimo mensaje:
+
+    msg1  32 B  enviado. La app lo acepta y contesta
+    msg2  96 B  recibido. Poly1305 valido, `s` descifrada, coincide con el announce
+    msg3  64 B  NO enviado
+
+La cadena de derivacion coincide con la de la app, asi que el `msg3` ya no seria
+adivinar: `write_handshake(b"")` sobre la sesion viva produce los 64 B correctos.
+**No esta hecho, y no se hace sin decision del usuario.** Ver `ESTADO.md` 3.5.
 
 ### 3.1 El `msg2` de 96 B: **RESUELTO** el 2026-10-05
 
@@ -272,7 +283,8 @@ Sigue sin explicar **qué** lo fija, pero la serie ya no son dos puntos sueltos.
 | 04-oct s2 | 16 B | 7 | 256 | 3 B | **sí** |
 | 05-oct 1a | 18 B | 7 | 512 | 4 B | no |
 | 05-oct 2a | 18 B | 7 | 512 | 4 B | **sí** |
-| 05-oct 3a (hoy) | 21 B | 7 | **768** | 8 B | no |
+| 05-oct 3a | 21 B | 7 | 768 | 8 B | no |
+| 05-oct 4a | 21 B | 7 | 768 | 8 B | **sí** |
 
 Lo que se ve:
 
@@ -288,6 +300,32 @@ Lo que **no** se ha comprobado: qué campo del código de la app produce `m` y
 su estado de sesión con nosotros. Es el candidato natural para explicar la
 intermitencia del `msg2`, así que está en la lista de lo que hay que mirar en
 `MessageHandler.kt` antes de culpar al BLE.
+
+### 3.2quater La identidad persistida, y por qué quizá el `msg2` es intermitente
+
+No verificado. **Una muestra a favor, y el resto en contra.**
+
+Todas las sesiones hasta la 05-oct 4a usaron las mismas claves, porque
+`Identity.cargar_o_crear` recupera el fichero si existe. Para la app siempre era
+el mismo par, `4baf99fa0b9298ba`.
+
+Si la app guarda una `NoiseSession` para ese `peer_id` y queda en un estado en el
+que no acepta empezar otra, el handshake se ignoraría. Encajaria con que el
+`msg2` llegara en las sesiones OVE primeras y no en las ultimas.
+
+La 05-oct 4a usó una identidad **nueva** (`--identity /tmp/otro.json`,
+`peer_id=1ee55365c50d8e11`) y el `msg2` llegó a la primera. Antes de esa, con la
+identidad vieja, no había llegado en las dos inmediatamente anteriores.
+
+Eso es **n=1 contra n=1**. No lo da por bueno. La forma de comprobarlo es
+alternar identidades en ejecuciones seguidas y ver si el `msg2` depende solo de
+cuánto nueva es, o si hay algo más (el móvil sin desbloquear, los
+15 min, el
+BLE).
+
+Operativamente: para una ejecución de prueba, **usar identidad nueva**, que además
+hace el trabajo de `_leer_msg2` más limpio. `--nickname` **no** sirve, se ignora
+en silencio si el fichero existe.
 
 ### 3.3 Un `MESSAGE` con 72 bytes de `0xff` sin explicar
 
@@ -326,7 +364,7 @@ Y esto se dejo dicho porque es el tercer fallo del mismo tipo: ir a por una
 hipotesis sin mirar lo que ya se sabia. El 04-oct el handshake **ya funcionaba
 sin announce**, con dos sesiones de evidencia, y eso estaba en este documento.
 
-### 3.5 El `msg2` solo se puede leer en el proceso que lo mandó
+### 3.5 El `msg2` se lee, y la cadena coincide: **VERIFICADO** 2026-10-05
 
 Descubierto el 2026-10-05. `probe_msg2.py` contestaba siempre que no:
 
@@ -335,7 +373,37 @@ Descubierto el 2026-10-05. `probe_msg2.py` contestaba siempre que no:
 
 Las dos líneas eran síntomas del mismo error: **nunca se escribió el `msg1`**.
 
-### La causa
+### El resultado
+
+Con una identidad nueva y la sesión viva, en el proceso que mandó el `msg1`:
+
+    --- leyendo el msg2 con la sesión viva ---
+      leído. carga útil: 0 B  <- lo esperado
+      remote_static_public: <los 32 B de la clave de la app>
+
+      TLV 0x02 del announce  <los mismos 32 B>
+      clave del msg2         <los mismos 32 B>
+      -> IGUAL
+      peer_id derivado:      34e01ccea10a8c6d
+      peer_id de la app:      34e01ccea10a8c6d
+      -> IGUAL
+
+Eso dice tres cosas a la vez:
+
+1. **El `msg1` de 32 B es correcto.** Si el `ck` derivado de él no fuera el de la
+   app, el Poly1305 del `msg2` no habría validado.
+2. **El `msg2` de 96 B es `e` + `s` cifrada + tag.** Descifrado, y la clave que
+   sale es la del announce.
+3. **La identidad queda autenticada.** La clave descifrada deriva al `peer_id` de
+   la app, que es el que esperáamos.
+
+### Lo que queda: enviar el `msg3` de 64 B
+
+Y ya no sería adivinar. Con la cadena verificada, el estado de la sesión es
+exactamente el que la app tiene, y `write_handshake(b"")` produce los 64 B
+correctos. **No está hecho**, y no se hace sin decisión.
+
+### Cómo fue la causa
 
 `noiseprotocol` no lleva un contador de mensajes: lleva una lista de patrones, uno
 por mensaje, y cada `read_message` hace `pop(0)` del primero
@@ -344,25 +412,21 @@ por mensaje, y cada `read_message` hace `pop(0)` del primero
     [[e], [e, ee, s, es], [s, se]]
 
 El `msg1` se lleva el primero. Sin `msg1` escrito, el `pop(0)` se come `[e]`, se
-procesa **un** token, y los 64 B restantes quedan de carga útil. Sin `mix_key` no
-hay clave, así que ese tramo ni se intenta descifrar: sale tal cual.
+procesa **un** token, y los 64 B de cola quedan de carga útil. Sin `mix_key` no
+hay clave, así que ese tramo ni se intenta descifrar: sale tal cual, y como no
+se comprueba nada, **no puede fallar**. De ahí el "leído sin error".
 
-De ahí el "leído sin error". **No leía nada, y por eso no puede fallar.**
+### Y el `msg2` no se puede descifrar a posteriori
 
-### Y ni siquiera escribiendo un `msg1` nuevo serviría
-
-Descifrar el `msg2` real exige la clave efímera **privada** del `msg1` que la app
-recibió de verdad, y esa solo existía en el proceso que lo mandó. El proceso
-se terminó; la captura no la tiene.
-
-Por eso la comprobación **no puede** hacerse con un fichero. Vive en
-`smoke_ble.py`, que es quien tiene la sesión viva justo después de enviar.
+Haga falta la clave efímera **privada** del `msg1` que la app recibió de verdad, y
+esa solo existía en el proceso que lo mandó. La captura no la tiene. Por eso
+la lectura vive en `smoke_ble.py` y no en un script sobre el fichero.
 
 ### Los cuatro desenlaces, todos distinguibles por la salida
 
 | Salida | Qué ha pasado |
 |---|---|
-| `carga útil: 0 B` + `IGUAL` | la cadena de derivación coincide con la de la app |
+| `carga útil: 0 B` + `IGUAL` | la derivación coincide con la de la app |
 | `carga útil: 0 B` + `DISTINTA` | el tag validó pero no es su identidad |
 | `carga útil: 64 B` | el motor solo consumió `[e]`: bug de quien llama |
 | `ERROR al leer` | el Poly1305 no validó: el `ck` no es el nuestro |
@@ -373,9 +437,6 @@ Por eso la comprobación **no puede** hacerse con un fichero. Vive en
 - `tools/probe_msg2.py`: ya no intenta descifrar, y **explica por qué no puede**.
 - `tests/test_msg2_en_proceso.py`: la firma del error, 9 tests.
 - `tests/test_leer_msg2.py`: los cuatro desenlaces sin Bluetooth, 18 tests.
-
-El `msg3` **sigue sin enviarse**. Con la clave a la vista se podría escribir, pero
-es otra decisión y no se toma sola.
 
 ## 4. Cómo arrancar
 
