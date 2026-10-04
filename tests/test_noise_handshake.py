@@ -403,6 +403,99 @@ class TestCompletarHandshake(unittest.TestCase):
         self.assertTrue(p.header.flags & PacketFlags.HAS_RECIPIENT)
 
 
+class TestParserDeHex(unittest.TestCase):
+    """Un error ilegible cuesta más que el fallo que causa.
+
+    El caso real: un `~` de más al pegar una clave de 32 bytes daba
+
+        invalid <lambda> value: '9735...6b~'
+
+    que no dice cuántos bytes se esperaban ni dónde está el problema. Y el fallo
+    real casi siempre es de copiar y pegar, así que el mensaje tiene que ayudar
+    a corregirlo.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+
+        ruta = ROOT / "tools" / "smoke_ble.py"
+        # Nombre de módulo **distinto** del de `TestSmokeBle`. Cargar dos veces
+        # el mismo fichero bajo nombres distintos no da dos módulos
+        # independientes: el segundo import reutiliza el primero, y se acaba
+        # probando la versión vieja con el error
+        # "_hex() takes 2 positional arguments".
+        spec = importlib.util.spec_from_file_location("smoke_ble_parsers", ruta)
+        mod = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(mod)
+        # `staticmethod` obligatorio: una función normal asignada en un `TestCase` se
+        # convierte en método enlazado y se come el primer argumento. El síntoma
+        # es el mismo de ayer, en otro sitio: `_hex() takes 2 positional
+        # arguments but 3 were given` habiendo pasado dos.
+        cls.hex = staticmethod(mod._hex)
+
+    def test_convierte_hex_valido(self):
+        self.assertEqual(self.hex("34e01ccea10a8c6d", 8), PEER_APP)
+
+    def test_acepta_el_prefijo_0x(self):
+        """Copiando de un visor que lo pone, aparece. No debería fallar."""
+        self.assertEqual(self.hex("0x" + NOISE_APP.hex(), 32), NOISE_APP)
+
+    def test_acepta_mayusculas(self):
+        self.assertEqual(self.hex(NOISE_APP.hex().upper(), 32), NOISE_APP)
+
+    def test_el_guion_bajo_falla_diciendo_que_caracter_es(self):
+        import argparse
+
+        malo = NOISE_APP.hex() + "~"
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            self.hex(malo, 32)
+        mensaje = str(ctx.exception)
+        self.assertIn("~", mensaje)
+        self.assertIn("64", mensaje)  # 32 bytes en hex
+
+    def test_la_longitud_equivocada_dice_cuantos_faltan(self):
+        """El error que se repite: cortar o pegar de más.
+
+        Una clave de 20 bytes pasada donde se esperan 8.
+        """
+        import argparse
+
+        corto = NOISE_APP.hex()[:40]  # 20 bytes
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            self.hex(corto, 8)
+        mensaje = str(ctx.exception)
+        self.assertIn("8", mensaje)   # los esperados
+        self.assertIn("20", mensaje)  # los que llegaron
+
+    def test_una_longitud_impar_se_distingue_de_una_corta(self):
+        """`34e01ccea` son 5 bytes: falta un dígito, no sobran bytes.
+
+        Son dos errores distintos y el mensaje debe distinguirlos, porque
+        pegar de menos es mucho más frecuente que pegar de más.
+        """
+        import argparse
+
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            self.hex("34e01ccea", 8)
+        self.assertIn("impar", str(ctx.exception))
+
+    def test_no_admite_espacios_en_medio(self):
+        """Un hex con espacios a mitad **no** debe aceptarse en silencio.
+
+        `bytes.fromhex` los tolera, así que sin comprobarlo, un pegado con
+        separadores de bloque pasaría y luego el handshake fallaría mucho más
+        tarde, con un error que no señala el origen.
+        """
+        import argparse
+
+        con = NOISE_APP.hex()[:16] + " " + NOISE_APP.hex()[16:]
+        with self.assertRaises(argparse.ArgumentTypeError) as ctx:
+            self.hex(con, 32)
+        self.assertIn("' '", str(ctx.exception))
+
+
 class TestSmokeBle(unittest.TestCase):
     """`_preparar` decide qué se envía. Un fallo aquí es silencioso.
 

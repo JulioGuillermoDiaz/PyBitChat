@@ -471,6 +471,54 @@ def _informe(recibidos: list[bytes]) -> int:
     return 0
 
 
+def _hex(valor: str, n_bytes: int) -> bytes:
+    """Convierte hex en `bytes`, o explica qué está mal.
+
+    Sin esto, un `~` de más al pegar da:
+
+        invalid <lambda> value: '9735...6b~'
+
+    que no dice ni cuántos bytes se esperaban ni dónde está el problema. Y el
+    fallo real es casi siempre de copiar y pegar, así que el mensaje tiene que
+    ayudar a corregirlo.
+
+    `n_bytes` es obligatorio: el número de bytes esperado es lo que hace falta
+    para decir "te faltan 4", que es el error que se repite.
+    """
+    limpio = valor.strip()
+    if limpio.lower().startswith("0x"):
+        limpio = limpio[2:]
+    # `bytes.fromhex` acepta espacios en medio (y los ignora). Eso hace que un
+    # pegado con separadores de bloque pase **en silencio** y el fallo aparezca
+    # mucho más tarde, al descifrar. Se rechazan a propósito: quien pega una
+    # clave la quiere exacta.
+    if any(c.isspace() for c in limpio):
+        blanco = "".join(sorted({c for c in limpio if c.isspace()}))
+        raise argparse.ArgumentTypeError(
+            f"el hexadecimal no lleva espacios dentro, y hay {blanco!r}. "
+            f"Se esperaba {n_bytes} bytes = {n_bytes * 2} dígitos hex seguidos."
+        )
+    try:
+        datos = bytes.fromhex(limpio)
+    except ValueError:
+        malos = [c for c in limpio if c not in "0123456789abcdefABCDEF"]
+        detalle = (
+            f"caracteres no válidos: {''.join(sorted(set(malos)))!r}"
+            if malos
+            else "longitud impar o formato incorrecto"
+        )
+        raise argparse.ArgumentTypeError(
+            f"no es hexadecimal ({detalle}). Se esperaba {n_bytes} bytes = "
+            f"{n_bytes * 2} dígitos hex, sin espacios ni prefijos raros."
+        ) from None
+    if len(datos) != n_bytes:
+        raise argparse.ArgumentTypeError(
+            f"se esperaban {n_bytes} bytes ({n_bytes * 2} hex) y llegaron "
+            f"{len(datos)} ({len(datos) * 2} hex)."
+        )
+    return datos
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--nickname", default="pybitchat-probe",
@@ -492,21 +540,20 @@ def main() -> int:
                    help="fichero donde se guardan los paquetes recibidos")
     p.add_argument("--handshake", action="store_true",
                    help="enviar NOISE_HANDSHAKE (msg1) en vez de ANNOUNCE")
-    p.add_argument("--peer-id", type=lambda s: bytes.fromhex(s), default=None,
+    p.add_argument("--peer-id", type=lambda s: _hex(s, 8), default=None,
                    help="peer_id de 8 bytes de la app, en hex. Va en "
                         "recipient_id; sin él la app descarta el paquete")
-    args = p.parse_args()
-    # En hexadecimal, para poder pasarlo a `completar_handshake` y comparar
-    # con el `peer_id` derivado. Duplicarlo aquí evita tener que arrastrar el
-    # `bytes` por tres funciones.
-    args.peer_id_hex = args.peer_id.hex() if args.peer_id else None
-    p.add_argument("--noise-public", type=lambda s: bytes.fromhex(s),
+    p.add_argument("--noise-public", type=lambda s: _hex(s, 32),
                    default=None,
                    help="clave Noise pública de 32 bytes de la app, en hex "
                         "(TLV 0x02 de su announce)")
     p.add_argument("--ttl-handshake", type=int, default=6,
                    help="saltos del handshake (por defecto 6, como la app)")
     args = p.parse_args()
+    # En hexadecimal, para poder pasarlo a `completar_handshake` y comparar
+    # con el `peer_id` derivado. Duplicarlo aquí evita arrastrar el `bytes` por
+    # tres funciones.
+    args.peer_id_hex = args.peer_id.hex() if args.peer_id else None
     if args.paquete:
         args.paquete = args.paquete.read_bytes()
     return asyncio.run(principal(args))
