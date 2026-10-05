@@ -194,6 +194,38 @@ PADDING_ENCRYPTION_OVERHEAD = 16
 MAX_PADDING_LENGTH = 255
 
 
+def optimal_block_size(data_size: int) -> int:
+    """El cubo de relleno que le toca a `data_size`. `MessagePadding.optimalBlockSize`.
+
+    Traducción literal:
+
+    ```kotlin
+    val totalSize = dataSize + 16
+    for (blockSize in blockSizes) { if (totalSize <= blockSize) return blockSize }
+    return dataSize
+    ```
+
+    ## Por qué el `+16` importa y no es un detalle
+
+    No es un margen generoso, es la cuenta de la app: reserva ~16 B de
+    sobrecoste de cifrado antes de elegir cubo. Sin él se elige el cubo
+    equivocado **solo en la franja justo debajo de cada frontera**:
+
+        241..256 B   sin +16 -> 256      con +16 -> 512
+
+    Es una franja estrecha, pero un announce con el nickname largo cae
+    justo ahí, así que importaba.
+
+    Y por encima del último cubo devuelve `data_size` tal cual: la app no
+    rellena lo que no cabe, porque ese paquete va a fragmentarse igual.
+    """
+    total = data_size + PADDING_ENCRYPTION_OVERHEAD
+    for cubo in PADDING_BUCKETS:
+        if total <= cubo:
+            return cubo
+    return data_size
+
+
 def should_pad_for_ble(msg_type: int) -> bool:
     """Política de relleno BLE, según `BLEPacketPaddingPolicy.kt`.
 

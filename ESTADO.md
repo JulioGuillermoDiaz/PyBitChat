@@ -527,6 +527,66 @@ Que la preimagen de la app sea **exactamente** la nuestra. `probe_announce.py` l
 verifica con los bytes reales y dice `>>> VALIDA` o `>>> NO VALIDA`. Con lo que
 sabemos, debería ser lo primero: `BinaryProtocol.kt:116-131` y §3.2bis.
 
+### 3.13 La preimagen de la firma iba **sin relleno**
+
+**Resuelto el 2026-10-06.** `probe_announce.py` reported `>>> NO VALIDA` con la
+firma de la propia app. Eso no puede pasar si la preimagen es la misma, así
+que la preimagen no era la misma.
+
+La línea responsable está al final de `toBinaryDataForSigning`:
+
+```kotlin
+return BinaryProtocol.encode(unsignedPacket)   // padding = true por defecto
+```
+
+Ese `padding` vale **`true`** por defecto en `BinaryProtocol.encode(padding:
+Boolean = true)`. La app firma los bytes **ya rellenos**. Nuestro
+`to_binary_data_for_signing()` decía *"sin relleno: el relleno no forma parte
+del paquete"* y llamó a `to_bytes(include_padding=False)`.
+
+### Lo que se deduce de los bytes
+
+El announce de la app ocupa 166 B reales (14 cabecera + 8 sender + 80 payload +
+64 firma) y sale en 256. Su preimagen son los **102 B** sin firma, y al
+rellenarlos `optimalBlockSize(102)` = `102+16` = 118 -&gt; cubo 256, o sea
+**154 bytes de `0x9a`**. Comprobado campo por campo contra el hexdump: la
+estructura de los 102 B era correcta byte a byte, solo faltaba el relleno.
+
+### El `+16` no es un detalle
+
+`MessagePadding.optimalBlockSize` compara `len + 16` contra cada cubo, no
+`len`. Consecuencia medida, en la franja 241..256 B:
+
+    sin +16 -> 256 B de salida
+    con +16 -> 512 B, y el relleno no cabe en un byte PKCS#7
+
+Así que en esa franja la app **no rellena** y deja el paquete tal cual.
+Añadido `optimal_block_size()` y `pkcs7_pad_to_bucket()` ahora lo usan.
+
+### `Packet.padding` es un campo, y por eso `to_bytes` no rellena
+
+`padding` guarda el relleno que **vino por el cable**, no se calcula. Un paquete
+recién construido lleva `padding=b""`, así que
+`to_bytes(include_padding=True)` no rellena nada. El parámetro dice una cosa
+y hace otra. No lo he cambiado: cambiarlo alteraría la decodificación, que
+ya funciona. Lo que se arregla es la preimagen, que sí debe rellenar.
+
+### `probe_announce` prueba las dos candidatas
+
+Antes probaba una sola y decía `NO VALIDA con esta preimagen`, como si
+hubiera una sola posible. Ahora prueba **con relleno y sin relleno**, y cuando
+ninguna vale lo dice así, en vez de dejar la conclusión abierta.
+
+### Medido
+
+    announce firmado:   256 B   (payload 89 B)
+    preimagen:          256 B
+    relleno:            145 B de 0x91
+    verifica:           True
+
+    preimagen  01 01 00 | ... | 00 | 00 59 | ...   TTL 0, sin HAS_SIGNATURE
+    cable      01 01 03 | ... | 02 | 00 59 | ...   TTL 3, con HAS_SIGNATURE
+
 ---
 
 ## 4. Cómo arrancar

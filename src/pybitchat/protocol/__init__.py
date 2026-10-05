@@ -46,6 +46,7 @@ from .types import (
     MessageFlags,
     MessageType,
     PacketFlags,
+    optimal_block_size,
     should_pad_for_ble,
 )
 
@@ -84,6 +85,7 @@ __all__ = [
     "SIGNATURE_SIZE",
     "UnsupportedPayloadField",
     "decode_payload",
+    "optimal_block_size",
     "pkcs7_pad_to_bucket",
     "should_pad_for_ble",
     "split_into_fragments",

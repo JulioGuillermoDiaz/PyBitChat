@@ -242,9 +242,13 @@ def _verificar(p: Packet, preimagen: bytes) -> list[str]:
 
     ## Qué comprueba además del resultado
 
-    Que la preimagen mida lo que tiene que medir. `to_binary_data_for_signing()`
-    quita la firma y fija el TTL, así que si el resultado no valida lo que se
-    compara está mal, no la firma.
+    Que la preimagen mida lo que tiene que medir, y sobre todo **prueba las dos
+    candidatas**: con relleno y sin relleno. Hasta el 2026-10-06 esta función
+    solo probaba una, y por eso salió `NO VALIDA` con la firma de la propia app
+    sin avisar de que la otra posible podía ser la buena.
+
+    Cuando las dos fallan dice exactamente eso, en vez de dejar
+    «el problema es la preimagen» como si hubiera una sola preimagen posible.
     """
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -254,29 +258,50 @@ def _verificar(p: Packet, preimagen: bytes) -> list[str]:
     if clave is None or len(clave) != 32:
         return ["    no hay clave de firma (TLV 0x03) con la que comprobar"]
 
+    # Se prueban **las dos** preimágenes candidatas, no solo la buena. La
+    # diferencia es el relleno, y hasta el 2026-10-06 creíamos que la app
+    # firmaba sin él. Reportar la que vale, y decir cuál de las dos es, evita
+    # tener que adivinarlo a la vista del resultado.
+    reales = 22 + len(p.payload)
+    candidatas = [
+        ("con relleno (encode con padding=true)", preimagen),
+        ("sin relleno", preimagen[:reales]),
+    ]
+
     l: list[str] = []
-    try:
-        Ed25519PublicKey.from_public_bytes(clave).verify(p.signature, preimagen)
-    except InvalidSignature:
-        l.append("    >>> NO VALIDA con esta preimagen")
+    vale = None
+    for nombre, candidata in candidatas:
+        try:
+            Ed25519PublicKey.from_public_bytes(clave).verify(p.signature, candidata)
+        except InvalidSignature:
+            l.append(f"    no valida {nombre}")
+            continue
+        vale = (nombre, candidata)
+        l.append(f"    >>> VALIDA {nombre}")
+        break
+
+    if vale is None:
         l.append("")
-        l.append("    Con la firma y la preimagen correctas, si no valida")
-        l.append("    el problema es la preimagen, no la firma:")
-        l.append("    fija el TTL y quita la firma, y hay que confirmar que")
-        l.append("    hace lo mismo que `BitchatPacket.toBinaryDataForSigning`.")
+        l.append("    Ninguna de las dos preimagenes vale. Entonces hay una")
+        l.append("    diferencia más que no es el relleno, y no la sabemos")
+        l.append("    todavía. Habría que ver `BinaryProtocol.encode` y el")
+        l.append("    `wirePayload` que devuelve `decode`.")
         return l
 
-    l.append("    >>> VALIDA")
+    nombre, ganadora = vale
+    relleno = len(ganadora) - reales
     l.append("")
-    l.append("    La preimagen es exactamente el paquete entero con:")
+    l.append(f"    La preimagen buena es la {nombre}:")
     l.append("      - la firma fuera")
     l.append("      - el TTL puesto a 0")
-    l.append("      - sin relleno")
-    l.append(f"      - {len(preimagen)} B = 12 cabecera + 8 sender + "
+    l.append(f"      - {reales} B reales = 12 cabecera + 8 sender + "
              f"{len(p.payload)} payload")
+    l.append(f"      - {relleno} B de relleno PKCS#7")
     l.append("")
-    l.append("    Esto es lo que hay que producir para que la app acepte")
-    l.append("    nuestro announce. No hay que deducir nada más.")
+    l.append("    Que la app firme los bytes ya rellenos no es un accidente:")
+    l.append("    `toBinaryDataForSigning` acaba en `BinaryProtocol.encode`,")
+    l.append("    y ese `padding` vale `true` por defecto. Firmar sobre los")
+    l.append("    bytes sin rellenar produce una firma que la app rechaza.")
     return l
 
 

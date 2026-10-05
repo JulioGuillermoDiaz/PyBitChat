@@ -102,7 +102,7 @@ class TestAnnounceFirmado(unittest.TestCase):
         self.assertEqual(p.header.ttl, 3, "el paquete si lleva su TTL")
 
     def test_la_preimagen_no_es_lo_que_se_manda(self):
-        """La diferencia que hizo fallar la primera versi\u00f3n de esto.
+        """La diferencia que hizo fallar la primera versión de esto.
 
         `to_binary_data_for_signing()` quita la firma y pone el TTL a 0.
         `to_bytes()` deja el TTL. Firmar el segundo produce una firma que no
@@ -124,20 +124,30 @@ class TestAnnounceFirmado(unittest.TestCase):
         self.assertNotIn(p.signature, pre)
 
     def test_el_ttl_no_afecta_a_la_firma(self):
-        """Firmar con TTL 3 o con TTL 7 da la **misma** firma.
+        """Firmar con TTL 3 o con TTL 7 produce la **misma** preimagen.
 
-        Es la raz\u00f3n de fijar el TTL a 0: el paquete baja en cada salto, y si el
-        TTL entrase en la preimagen, un paquete reenviado una sola vez dejar\u00eda de
+        Es la razón de fijar el TTL a 0: el paquete baja en cada salto, y si el
+        TTL entrase en la preimagen, un paquete reenviado una sola vez dejaría de
         validar en el receptor.
+
+        Se fija el timestamp a mano porque también entra en la preimagen: sin
+        eso, los dos announces llevarían tiempos distintos y el test no
+        comprobaría lo que dice comprobar.
         """
-        a = Packet.from_bytes(self.ident.announce_packet(ttl=3, firmar=True))
-        b = Packet.from_bytes(self.ident.announce_packet(ttl=7, firmar=True))
+        a = Packet.from_bytes(
+            self.ident.announce_packet(ttl=3, firmar=True, timestamp=1_000)
+        )
+        b = Packet.from_bytes(
+            self.ident.announce_packet(ttl=7, firmar=True, timestamp=1_000)
+        )
+        self.assertNotEqual(a.header.ttl, b.header.ttl, "los TTL si son distintos")
+        self.assertEqual(a.signature, b.signature)
         self.assertEqual(
-            a.to_binary_data_for_signing()[2:], b.to_binary_data_for_signing()[2:]
+            a.to_binary_data_for_signing(), b.to_binary_data_for_signing()
         )
 
     def test_el_timestamp_si_afecta_a_la_firma(self):
-        """El timestamp va en la preimagen, as\u00ed que dos announces distintos
+        """El timestamp va en la preimagen, así que dos announces distintos
         no pueden llevar la misma firma."""
         a = self.ident.announce_packet(ttl=3, firmar=True, timestamp=1_000)
         b = self.ident.announce_packet(ttl=3, firmar=True, timestamp=2_000)
@@ -158,7 +168,7 @@ class TestAnnounceFirmado(unittest.TestCase):
 
 
 class TestElFlagEnSmokeBle(unittest.TestCase):
-    """El flag llega desde la l\u00ednea de \u00f3rdenes hasta el announce."""
+    """El flag llega desde la línea de órdenes hasta el announce."""
 
     def test_firmar_llega_a_announce_packet(self):
         import inspect
@@ -176,8 +186,8 @@ class TestElFlagEnSmokeBle(unittest.TestCase):
     def test_el_handshake_no_hereda_el_flag(self):
         """La app **no** firma los handshakes (`MessageHandler.kt:392`).
 
-        As\u00ed que `--firmar` con `--handshake` no puede acabar firmando el
-        `msg1`. Se comprueba sobre el c\u00f3digo: `iniciar_handshake` no recibe
+        Así que `--firmar` con `--handshake` no puede acabar firmando el
+        `msg1`. Se comprueba sobre el código: `iniciar_handshake` no recibe
         `firmar`.
         """
         import inspect

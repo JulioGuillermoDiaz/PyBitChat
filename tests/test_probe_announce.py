@@ -191,10 +191,13 @@ class TestVerificarFirma(unittest.TestCase):
         sin_firma = Packet(header=cabecera, sender_id=ident.peer_id,
                            payload=carga)
         # Se firma `to_binary_data_for_signing()`, **no** `to_bytes()`.
-        # No son lo mismo: la preimagen pone el TTL a 0 y quita la firma, y
-        # `to_bytes()` deja el TTL intacto. Firmar el segundo y validar contra
-        # el primero da una firma que no valida, que es lo que pasó con la
-        # primera versión de este test.
+        # No son lo mismo, por dos razones:
+        #
+        #   - la preimagen pone el TTL a 0, y `to_bytes()` lo deja intacto;
+        #   - la preimagen va **rellena**, y `to_bytes()` no.
+        #
+        # Firmar el segundo y validar contra el primero da una firma que no
+        # valida. Pasó dos veces: primero por el TTL, luego por el relleno.
         #
         # Y la firma se añade al `Packet`, no se pega al final: pegada a mano,
         # `Packet.from_bytes` la leeria como ausente.
@@ -210,12 +213,20 @@ class TestVerificarFirma(unittest.TestCase):
 
     def test_una_firma_alterada_no_valida(self):
         """Si la firma está tocada, tiene que decir que no."""
+        p0 = probe.Packet.from_bytes(self._anuncio_con_firma_valida())
         crudo = bytearray(self._anuncio_con_firma_valida())
-        # el byte 120 cae dentro de los 64 de firma (102..165)
-        crudo[120] ^= 0xFF
+        # La firma va justo despues de los bytes reales: 22 + len(payload).
+        inicio = 22 + len(p0.payload)
+        self.assertEqual(inicio + 64, 166, "el announce firmado debe medir 166 B")
+        crudo[inicio + 8] ^= 0xFF
         p = probe.Packet.from_bytes(bytes(crudo))
         texto = "\n".join(probe.describir_anuncio(p))
-        self.assertIn("NO VALIDA", texto)
+        # Con la firma tocada no vale ninguna de las dos preimagenes, y el
+        # mensaje lo dice: antes decia "NO VALIDA con esta preimagen", como si
+        # hubiera una sola candidata.
+        self.assertIn("no valida con relleno", texto)
+        self.assertIn("no valida sin relleno", texto)
+        self.assertIn("NINGUNA", texto.upper())
 
     def test_sin_firma_no_llega_a_verificar(self):
         """El announce nuestro va por la rama de "SIN FIRMA", que ya explica
@@ -253,7 +264,7 @@ class TestVerificarFirma(unittest.TestCase):
         texto = "\n".join(probe.describir_anuncio(p))
         self.assertIn("12 cabecera", texto)
         self.assertIn("el TTL puesto a 0", texto)
-        self.assertIn("sin relleno", texto)
+        self.assertIn("relleno", texto)
 
     def test_el_ttl_de_la_preimagen_es_cero(self):
         """La regla del TTL, comprobada sobre los bytes de la preimagen."""
@@ -267,7 +278,30 @@ class TestVerificarFirma(unittest.TestCase):
         self.assertIsNotNone(p.signature, "el announce deberia ir firmado")
         pre = p.to_binary_data_for_signing()
         self.assertNotIn(p.signature, pre)
-        self.assertEqual(len(pre), 22 + len(p.payload))
+        reales = 22 + len(p.payload)
+        self.assertEqual(
+            len(pre), 256,
+            "la preimagen va rellena a 256, como la de la app",
+        )
+        # Los bytes reales coinciden con el cable salvo dos: el TTL (byte 2), que
+        # la preimagen pone a 0, y los flags (byte 11), que pierden el
+        # HAS_SIGNATURE al no haber firma. Lo demas es relleno.
+        cable = p.to_bytes(include_padding=False)
+
+        def _sin(numeros, datos: bytes) -> bytes:
+            return bytes(b for i, b in enumerate(datos[:reales])
+                         if i not in numeros)
+
+        self.assertEqual(_sin({2, 11}, pre), _sin({2, 11}, cable))
+        self.assertEqual(pre[2], 0, "el TTL de la preimagen es 0")
+        self.assertEqual(cable[2], 7, "el del cable es el que llevaba")
+        self.assertEqual(pre[11] & 0x02, 0, "la preimagen no se firma a si misma")
+        self.assertTrue(cable[11] & 0x02)
+        relleno = 256 - reales
+        self.assertEqual(
+            pre[-relleno:], bytes([relleno]) * relleno,
+            "el relleno es PKCS#7 con su propia longitud como byte",
+        )
 
     def test_lo_que_se_firma_no_es_lo_que_se_manda(self):
         """La diferencia que hizo fallar la primera versión, medida.

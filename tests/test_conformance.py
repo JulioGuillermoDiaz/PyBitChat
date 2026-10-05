@@ -562,17 +562,67 @@ class TestRelleno(unittest.TestCase):
         self.assertFalse(should_pad_for_ble(FRAGMENT_SIZE_THRESHOLD - 1))
 
     def test_cubos_de_relleno(self):
-        """`padding produces correct block sizes and round-trips`"""
+        """`padding produces correct block sizes and round-trips`
+
+        Rellena al cubo que le toca según `MessagePadding.optimalBlockSize`, que
+        compara `len + 16` contra cada cubo. Por eso el dato de prueba es de
+        `cubo - 17` y no de `cubo - 1`: el segundo no cabe ni con el margen de
+        cifrado reservado, y la app lo empuja al cubo siguiente.
+        """
         from pybitchat.protocol.packet import pkcs7_pad_to_bucket
-        from pybitchat.protocol.types import PADDING_BUCKETS
+        from pybitchat.protocol.types import (
+            PADDING_BUCKETS,
+            PADDING_ENCRYPTION_OVERHEAD,
+        )
 
         for cubo in PADDING_BUCKETS:
             with self.subTest(cubo=cubo):
-                # Un paquete que cabe justo en el cubo no necesita relleno.
-                datos = b"x" * (cubo - 1)
+                datos = b"x" * (cubo - PADDING_ENCRYPTION_OVERHEAD - 1)
                 relleno = pkcs7_pad_to_bucket(datos)
-                self.assertLessEqual(len(relleno), cubo)
+                self.assertEqual(len(relleno), cubo)
                 self.assertGreater(len(relleno), len(datos))
+
+    def test_el_margen_de_cifrado_manda_en_la_franja(self):
+        """La franja 241..256 B: aquí el `+16` **no rellena**, y es lo correcto.
+
+        Sin margen, 250 B rellenarían a 256 con 6 bytes de `0x06`. Con el
+        margen, el cubo pasa a 512 y harían falta 262 bytes de relleno — que
+        PKCS#7 no puede expresar en un byte, así que la app **deja el paquete
+        sin tocar**. `MessagePadding.pad` devuelve los datos tal cual.
+
+        Es el test que distingue las dos implementaciones: si `+16` desapareciera,
+        estos 16 tamaños volverían a 256 B y nadie lo notaría mirando solo un
+        announce de 106 B.
+        """
+        from pybitchat.protocol.packet import pkcs7_pad_to_bucket
+        from pybitchat.protocol.types import optimal_block_size
+
+        for tam in range(241, 257):
+            with self.subTest(tam=tam):
+                datos = b"x" * tam
+                self.assertEqual(optimal_block_size(tam), 512)
+                self.assertEqual(
+                    pkcs7_pad_to_bucket(datos), datos,
+                    "un relleno de mas de 255 B no cabe en PKCS#7: sin relleno",
+                )
+
+        # Justo por debajo de la franja sí rellena a 256, como siempre.
+        self.assertEqual(len(pkcs7_pad_to_bucket(b"x" * 240)), 256)
+
+    def test_el_relleno_imposible_no_inventa_bytes(self):
+        """La guarda es del original (`MessagePadding.pad`).
+
+        Ni un relleno de 0 ni de 256 bytes: cero es un paquete ya alineado, y un
+        valor inventado haría que `unpad` descifrase basura.
+        """
+        from pybitchat.protocol.packet import pkcs7_pad_to_bucket
+        from pybitchat.protocol.types import PADDING_BUCKETS
+
+        mayor = PADDING_BUCKETS[-1]
+        for extra in (1, 100, 4096):
+            with self.subTest(extra=extra):
+                datos = b"x" * (mayor + extra)
+                self.assertEqual(pkcs7_pad_to_bucket(datos), datos)
 
 
 # --------------------------------------------------------------------------
@@ -616,12 +666,41 @@ class TestPreimagenDeFirma(unittest.TestCase):
             "el TTL no debe entrar en la preimagen",
         )
 
-    def test_sin_relleno(self):
-        """La preimagen no incluye relleno: el relleno no es parte del paquete."""
+    def test_la_preimagen_lleva_el_relleno_por_defecto(self):
+        """La preimagen **sí** incluye relleno, y es la regla que faltaba.
+
+        `BinaryProtocol.encode(unsignedPacket)` usa `padding = true` por
+        defecto, así que la app firma los bytes ya rellenos. Aquí se para un
+        relleno *inventado* de 200 B y se comprueba que la preimagen lo cambia:
+        si lo ignorase, volvería al tamaño sin rellenar.
+        """
         original = make_packet(b"x" * 300)
         original.padding = b"\x00" * 200
         con = len(original.to_binary_data_for_signing())
-        self.assertEqual(con, len(original.to_bytes(include_padding=False)))
+        self.assertNotEqual(con, len(original.to_bytes(include_padding=False)))
+
+    def test_la_preimagen_recalcula_el_relleno(self):
+        """El relleno es el que le toca por longitud, no el que traía el cable.
+
+        `Packet.padding` es el relleno que llegó por el cable. La preimagen lo
+        descarta y vuelve a llenar, que es lo que hace `encode` sobre un paquete
+        recién construido.
+        """
+        original = make_packet(b"x" * 100)
+        pre = original.to_binary_data_for_signing()
+        real = len(pre) - len(original.to_bytes(include_padding=False))
+        self.assertEqual(
+            bytes([real]) * real, pre[-real:],
+            "el relleno final debe ser PKCS#7 con su propia longitud",
+        )
+
+    def test_el_relleno_es_estable_entre_llamadas(self):
+        """Firmar dos veces da la misma preimagen: si no, no habría firma."""
+        original = make_packet(b"x" * 100)
+        self.assertEqual(
+            original.to_binary_data_for_signing(),
+            original.to_binary_data_for_signing(),
+        )
 
 
 if __name__ == "__main__":

@@ -52,12 +52,14 @@ from . import compression
 from .types import (
     HEADER_SIZE,
     HEADER_SIZE_V2,
+    MAX_PADDING_LENGTH,
     PADDING_BUCKETS,
     PEER_ID_SIZE,
     SIGNATURE_SIZE,
     LegacyMessageType,
     MessageType,
     PacketFlags,
+    optimal_block_size,
 )
 
 
@@ -510,33 +512,52 @@ class Packet:
         return replace(self, header=replace(self.header, ttl=ttl & 0xFF))
 
     def to_binary_data_for_signing(self, *, ttl: int = SYNC_TTL_HOPS) -> bytes:
-        """Bytes que se firman: sin firma y con el TTL fijado.
+        """Bytes que se firman: sin firma, con el TTL fijado, **y rellenos**.
 
-        Reproduce `BitchatPacket.toBinaryDataForSigning`. Dos reglas, y las dos
-        importan:
+        Reproduce `BitchatPacket.toBinaryDataForSigning`, cuya última línea es:
+
+        ```kotlin
+        return BinaryProtocol.encode(unsignedPacket)
+        ```
+
+        Y ahí está la tercera regla, la que costó el diagnóstico entero: ese
+        `encode` usa el valor por defecto de `padding`, que es **`true`**.
+
+        ## Las tres reglas
 
         1. **La firma se quita.** No se puede firmar algo que incluye su propia
            firma.
         2. **El TTL se fija a 0** (`SYNC_TTL_HOPS`), en vez de usar el actual.
+           El TTL baja en cada salto, así que un paquete reenviado *una sola
+           vez* llega con un TTL distinto del que se firmó. Fijándolo a 0, la
+           firma es idéntica la haya recorrido el paquete cero o veinte saltos.
+        3. **Se rellena.** No es un extra: la app firma los bytes ya rellenos,
+           así que una firma hecha sobre 102 B **no valida** contra los 256 B
+           que ella reconstruye.
 
-        La segunda es la razón de fondo: el TTL baja en cada salto, así que un
-        paquete que ha sido reenviado *una sola vez* llega con un TTL distinto
-        del que se firmó. Si el TTL entrase en la preimagen, la verificación
-        fallaría en el receptor y el mensaje sería descartado. Fijándolo a 0,
-        la firma es idéntica la haya recorrido el paquete cero o veinte saltos.
+        ## La 3 se perdió por omitir un parámetro
 
-        Devuelve los bytes sin relleno: el relleno no forma parte del paquete.
+        Esta función decía *"sin relleno: el relleno no forma parte del
+        paquete"*. Sonó razonable y era falso: `include_padding=False` convirtió
+        un detalle de implementación de Kotlin en una regla del protocolo, y dio
+        por resultado un announce perfectamente válido que la app rechazaba. Lo
+        detectó
+        `probe_announce.py`: la **firma de la propia app** no validaba contra
+        nuestra preimagen, cosa que no puede pasar si la preimagen es la misma.
+
+        Con los 102 B de un announce sin firma: `optimal_block_size(102)` →
+        `102+16=118` → cubo 256, o sea **154 bytes de `0x9a`**.
         """
         copia = replace(self, signature=None)
         copia = copia.with_ttl(ttl)
-        return copia.to_bytes(include_padding=False)
+        return pkcs7_pad_to_bucket(copia.to_bytes(include_padding=False))
 
     def __len__(self) -> int:
         return len(self.to_bytes())
 
 
 def pkcs7_pad_to_bucket(data: bytes, buckets: tuple[int, ...] = PADDING_BUCKETS) -> bytes:
-    """Rellena `data` al siguiente cubo de `buckets` con bytes PKCS#7.
+    """Rellena `data` al cubo que le toca, con bytes PKCS#7.
 
     **Reproduce el relleno real de la app Android.** Verificado el 2026-10-03
     con announces de 256 B:
@@ -547,24 +568,41 @@ def pkcs7_pad_to_bucket(data: bytes, buckets: tuple[int, ...] = PADDING_BUCKETS)
     Los dos cuadran con PKCS#7: la longitud del relleno es el byte, y el total
     cae en 256 B.
 
-    ⚠️ **El `data` que se pasa debe incluir la firma de 64 B**, si la lleva. Con
-    los 102 B del announce sin firma, el relleno saldría de 154 B con un byte
-    de 90, que **no** cuadraría — y fue exactamente el error que llevó a decir
-    que el relleno no era PKCS#7. Está documentado en
-    `should_pad_for_ble`, que es donde vive la política.
+    ## El cubo lo elige `optimal_block_size`, no `len(data) <= bucket`
+
+    Antes comparaba la longitud pelada contra cada cubo. La app compara
+    `len(data) + 16` (`MessagePadding.optimalBlockSize`), así que en la franja
+    justo debajo de cada frontera elegíamos un cubo **menor** que el suyo:
+
+        241..256 B   aquí -> 256      la app -> 512
+
+    El caso que lo destapó: la preimagen de un announce son 102 B, y con
+    el `+16` sale cubo 256 y **154 bytes de `0x9a`**. Sin el `+16` salía
+    igual de 256, así que ahí no se nota; con un nickname largo sí.
+
+    ## El `data` que se pasa debe llevar la firma, si la lleva
+
+    Con los 102 B del announce *sin* firma salen 154 B de relleno y el byte
+    `0x9a` = 154, lo cual **no cuadra** con el announce de la app (que trae la
+    firma y por eso tiene 166 B y 90 B de relleno). No es un fallo del relleno:
+    es que son dos paquetes distintos. Por eso la preimagen se firma **con**
+    relleno, como la app. Ver `Packet.to_binary_data_for_signing`.
 
     Nota: la implementación de referencia usa *bytes aleatorios* aquí pero
     *byte repetido* en `command_handling.rs:326`. Es una inconsistencia
     conocida del código original; aquí se usa la forma PKCS#7 estándar.
     """
-    for bucket in buckets:
-        if len(data) <= bucket:
-            needed = bucket - len(data)
-            if needed == 0:
-                return data
-            if needed > 255:
-                # PKCS#7 no puede codificar un relleno de más de 255 bytes.
-                return data
-            return data + bytes([needed]) * needed
-    # Por encima del cubo más grande no hay nada que hacer.
-    return data
+    if buckets == PADDING_BUCKETS:
+        # El cubo lo elige la app, con su +16 de sobrecoste de cifrado.
+        objetivo = optimal_block_size(len(data))
+    else:
+        # Un juego de cubos a medida manda sobre el comportamiento por defecto.
+        objetivo = next((c for c in buckets if len(data) <= c), len(data))
+
+    needed = objetivo - len(data)
+    if needed <= 0:
+        return data
+    if needed > MAX_PADDING_LENGTH:
+        # PKCS#7 codifica la longitud del relleno en un byte: no cabe.
+        return data
+    return data + bytes([needed]) * needed
