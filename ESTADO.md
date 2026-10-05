@@ -1014,8 +1014,8 @@ Eso parte el problema en dos, y son dos trabajos distintos:
 
 | | Significa | Qué hacer |
 |---|---|---|
-| **hay candado** | sesión establecida; el `0x11` no sale por otra razón | instrumentar por qué no se emite |
-| **no hay candado** | la app nunca completó el handshake | eso es lo que hay que arreglar |
+| **hay candado** | sesión establecida; el `0x11` no sale | instrumentar por qué |
+| **no hay candado** | el handshake no completó | eso es lo que hay que arreglar |
 
 Ojo con la pantalla: la de la app que sale en la captura es la de **canales**
 (`mesh [0 personas]`, Cuadra/Barrio/Región). No es la lista de pares. `mesh [0
