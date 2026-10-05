@@ -619,27 +619,76 @@ async def _escuchar_handshake(
     `probe_msg2.py` **no** puede descifrar el `msg2`: le falta la clave efímera
     privada del `msg1`, que solo existía en el proceso que lo mandó. Aquí está
     la sesión viva, así que este es el sitio donde se lee. Ver `_leer_msg2`.
+
+    ## Por qué se reacciona al `msg2` en vez de esperar el plazo entero
+
+    # Por qué reacts al `msg2` en vez de esperar el plazo entero
+
+    ## El fallo
+
+    La app expira un handshake a medias en 10 s:
+
+    ```kotlin
+    private const val HANDSHAKE_TIMEOUT_MS = 10_000L
+    ```
+
+    y un barredor cada 2 s la destruye. Este script esperaba los 20 s enteros
+    antes de mirar qué había llegado, así que el `msg3` salía en t≈20 s contra
+    una sesión que la app ya había tirado en t≈12 s. `getSession(peerID)`
+    devolvía `None`, se creaba una sesión de responder en blanco y el `msg3` de
+    64 B no encajaba: `Handshake failed`. Sin `msg3` no hay `establishedNow`, y
+    sin `establishedNow` no hay `sendState`, y sin eso no llega ningún `0x11`.
+
+    ## Por qué es un fallo silencioso y no un error
+
+    Por el lado de la app, el `msg2` ya se había mandando bien y todo parecía
+    correcto: la clave estática coincidía, el `peer_id` derivaba igual, el
+    `split()` iba bien. El único síntoma era que no llegaba un `0x11`, que
+    además es normal si no hay sesión — y el propio script lo dice en el mensaje
+    de "nada nuevo". Un fallo de temporización que se lee como "todavía no".
+
+    Por eso aquí se sondea: en cuanto hay un `msg2` de 96 B se lee y se contesta,
+    y el plazo que queda se usa para escuchar el `0x11`, que es lo que de verdad
+    interesa.
     """
     print(f"\nescuchando la respuesta hasta {args.segundos} s…")
-    await asyncio.sleep(args.segundos)
+    print("  (en cuanto llegue el msg2 de 96 B se contesta; la app expira un")
+    print("   handshake a los 10 s, HANDSHAKE_TIMEOUT_MS)")
 
     vistos = 0
     resultado = None
     enviados_msg3 = False
-    for datos in list(recibidos):
-        paquete = _primero_inesperado(datos)
-        if paquete is None:
-            continue
-        vistos += 1
-        if paquete.header.raw_type == 0x10 and resultado is None:
-            print(f"\n  respuesta de la app: NOISE_HANDSHAKE de "
-                  f"{len(paquete.payload)} B")
-            print(f"    payload = {paquete.payload.hex()}")
-            resultado = _leer_msg2(paquete.payload, sesion, args)
-            if await _enviar_msg3(
-                cliente, car, args, identidad, sesion, resultado
-            ):
-                enviados_msg3 = True
+    limite = time.monotonic() + args.segundos
+    # Los índices ya mirados, para no volver a procesar el mismo paquete cuando
+    # el sondeo repita la lista.
+    atendidos = 0
+
+    while time.monotonic() < limite:
+        for datos in list(recibidos)[atendidos:]:
+            atendidos += 1
+            paquete = _primero_inesperado(datos)
+            if paquete is None:
+                continue
+            vistos += 1
+            # El `msg2` es lo único que hay que contestar en cuanto llega: es lo
+            # que tiene que entrar antes del plazo de la app.
+            if paquete.header.raw_type == 0x10 and resultado is None:
+                if len(paquete.payload) != 96:
+                    print(f"\n  NOISE_HANDSHAKE de {len(paquete.payload)} B, no 96")
+                    print("    no es un msg2 (e + ee + s + es + tag) y no se contesta")
+                    continue
+                print(f"\n  respuesta de la app: NOISE_HANDSHAKE de "
+                      f"{len(paquete.payload)} B")
+                print(f"    payload = {paquete.payload.hex()}")
+                resultado = _leer_msg2(paquete.payload, sesion, args)
+                if await _enviar_msg3(
+                    cliente, car, args, identidad, sesion, resultado
+                ):
+                    enviados_msg3 = True
+        if resultado is not None:
+            break
+        await asyncio.sleep(0.2)
+
     if enviados_msg3:
         print(f"\nescuchando {args.segundos} s más, por si la app contesta...")
         antes = len(recibidos)
@@ -981,8 +1030,9 @@ def main() -> int:
                    default=None,
                    help="clave Noise pública de 32 bytes de la app, en hex "
                         "(TLV 0x02 de su announce)")
-    p.add_argument("--ttl-handshake", type=int, default=6,
-                   help="saltos del handshake (por defecto 6, como la app)")
+    p.add_argument("--ttl-handshake", type=int, default=MESSAGE_TTL_HOPS,
+                   help="saltos del handshake (por defecto 7, como la app; "
+                        "con 6 la app no lo marca como ingress directo)")
     args = p.parse_args()
     # `--msg3` sin `--handshake` no tendr{i}a ninguna sesi{o}n que completar:
     # el `msg3` es la respuesta a un `msg2`, y el `msg2` solo se pide al mandar

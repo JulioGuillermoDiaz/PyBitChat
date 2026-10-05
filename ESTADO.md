@@ -710,6 +710,85 @@ lleva nuestro `peer_id` si y solo si nos tiene como par verificado *y* con
 conexión directa ahora mismo. Se ve en la traza, sin tocar el móvil y sin
 mirar ninguna lista, y distingue lo que antes solo se podía ver preguntando.
 
+### 3.16 El `msg3` llegaba 8 s tarde, a una sesión ya destruida
+
+**Resuelto el 2026-10-06.** El announce y el `msg1` ya iban bien: `peer_id`
+aprendido del announce firmado, `msg2` de 96 B, `IGUAL` en la clave y en el
+`peer_id`, `msg3` de 64 B con `split()` correcto. Y aun así **no llegó ningún
+`0x11`**.
+
+### El timeout de la app
+
+`NoiseSessionManager` tiene 10 s, con un barredor cada 2 s:
+
+```kotlin
+private const val HANDSHAKE_TIMEOUT_MS = 10_000L
+// ...
+if (session.isHandshaking() && isHandshakeStale(session, nowMs)) {
+    Log.d(TAG, "Expiring stale handshake with $peerID")
+    sessions.remove(peerID, session)?.destroy()
+```
+
+Y `smoke_ble` esperaba el plazo entero antes de mirar:
+
+```python
+await asyncio.sleep(args.segundos)   # 20 s
+...
+resultado = _leer_msg2(paquete.payload, sesion, args)   # y solo entonces
+```
+
+La cronología de la traza:
+
+| t | qué pasa |
+|---|---|
+| 0,0 s | mandamos `msg1` |
+| ~0,3 s | la app contesta `msg2` ✓ |
+| ~12 s | **la app expira y destruye** la sesión |
+| ~20 s | leemos el `msg2` y mandamos el `msg3` |
+| — | llega a `getSession(peerID) == null` |
+
+El `msg3` se topó con una sesión de responder en blanco: `Handshake failed`, y
+`establishedNow` nunca llegó a ser `true`.
+
+### Por qué era difícil de leer
+
+La cadena de consecuencias llega hasta el `0x11`:
+
+```
+msg3 -> isEstablished() -> establishedNow = true
+      -> onKeyExchangeCompleted -> onSessionAuthenticated
+      -> ensureSession -> sendState          <-- el 0x11 sale aquí
+```
+
+Y todo lo verificable daba bien: la `s` del `msg2` descifraba, la clave
+estática era `IGUAL`, el `peer_id` derivaba `IGUAL`, el `msg3` se construyó con
+64 B. El único síntoma era que no llegara un `0x11`, que además el propio script
+explica:
+
+> El handshake establishment no tiene respuesta propia en Noise
+
+Lo cual es **verdad**. Un fallo de temporización que se lee como una espera
+normal, y por eso no se distinguió de "aún no ha llegado".
+
+### Lo implementado
+
+- El sondeo del `msg2` cada 200 ms, y se contesta **en cuanto se ve**, sin
+  agotar el plazo. El plazo restante se usa para escuchar el `0x11`.
+- Un `NOISE_HANDSHAKE` que no sea de 96 B no se contesta, y se dice por qué: un
+  `msg3` de 64 B reenviado a la app la haría procesar basura.
+- `--ttl-handshake` pasa a 7, que es lo que usa la app para todo lo suyo. Con 6,
+  `isDirectIngress` (`ttl == MESSAGE_TTL_HOPS`) quedaba falso y la sesión no se
+  marcaba como ingress directo. No bloqueaba el Noise, pero era una diferencia
+  real y no costaba nada.
+- `tests/test_escuchar_handshake.py`, 9 tests. El del reloj **falla antes del
+  arreglo**: con plazo de 6 s y `msg2` a los 200 ms, el `msg3` tiene que salir en
+  el primer sondeo.
+
+### Lo que queda
+
+Un `0x11` recibido. Con esto el enlace queda cerrado en las dos direcciones:
+announce firmado y verificado → handshake → mensaje cifrado.
+
 ---
 
 ## 4. Cómo arrancar
