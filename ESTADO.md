@@ -817,6 +817,149 @@ normal, y por eso no se distinguió de "aún no ha llegado".
 Un `0x11` recibido. Con esto el enlace queda cerrado en las dos direcciones:
 announce firmado y verificado → handshake → mensaje cifrado.
 
+### 3.17 Confirmado desde el log de la propia app
+
+**2026-10-06.** Hasta aquí todo lo verificado salía de nuestros propios bytes. Con
+el panel de debug de la app, el testigo es **ella**. Y el resultado es bueno.
+
+#### El acceso
+
+El panel no está en los ajustes. La cadena, en el código:
+
+```kotlin
+// ChatScreen.ChatDialogs
+AboutSheet(isPresented = showAppInfo, onShowDebug = { showDebugSheet = true })
+if (showDebugSheet) { DebugSettingsSheet(...) }
+```
+
+O sea: el `AboutSheet` es el de los ajustes, y **dentro** hay una fila
+`about_debug_settings` = **"Debug Settings"** que abre otra hoja encima.
+
+Y **hay que activar "Verbose logging" antes de nada**: sin ese interruptor el
+panel no registra los paquetes entrantes.
+
+#### La línea que lo resuelve
+
+```
+Incoming v1 16 from pybitchat-probe (09dce4fe...) (C0:35:32:98:3A:EE)
+Received NOISE_HANDSHAKE from pybitchat-probe (09dce4fe...) via C0:35:32:98:3A:EE
+Outgoing v1 NOISE_HANDSHAKE to pybitchat-probe (09dce4fe..., C0:35:32:98:3A:EE)
+```
+
+El `16` de la primera línea es `0x10`, el tipo del paquete en decimal. Los tres
+iconos que los preceden (entrada, caja, salida) distinguen el sentido, y el texto
+es lo único que importa: se leen igual sin iconos.
+
+#### Lo que salió, en orden cronológico
+
+```
+18:15:31  unknown (unknown) connected to our server
+             <-- somos un BLE cualquiera, sin nombre
+18:15:32  Received ANNOUNCE from 09dce4fe2058f5db
+             <-- llega nuestro announce
+18:15:32  pybitchat-probe (09dce4fe2058f5db) connected to our server
+             <-- ya somos peer con nombre
+18:15:32  Incoming v1 16 from pybitchat-probe (09dce4fe2058f5db)
+             <-- 16 = 0x10, nuestro msg1
+18:15:32  Received NOISE_HANDSHAKE from pybitchat-probe (09dce4fe2058f5db)
+18:15:32  Outgoing v1 NOISE_HANDSHAKE to pybitchat-probe (...)
+             <-- su msg2
+```
+
+Eso confirma, **con ella como testigo**:
+
+| | |
+|---|---|
+| announce firmado, aceptado, verificado | §3.12, §3.13 |
+| par directo, con `sender_id` ya resuelto | §3.14 |
+| nuestro `msg1` recibido y procesado | §3.2 |
+| su `msg2` de 96 B con la `s` correcta | §3.3 |
+| nuestro `msg3` recibido | **sin confirmar**: la respuesta fue "noise hand shake"
+ a la pregunta de si había un segundo `Incoming`. Lo más probable, pero sin leer |
+
+El salto de 18:15:31 a 18:15:32 es la mejor prueba de la cadena: **sin nuestro
+announce no hay par con nombre**, y con él lo hay en un segundo.
+
+#### El límite del panel: no puede decir por qué falla
+
+Los errores que buscamos **no salen ahí**, y el motivo es de arquitectura:
+
+```kotlin
+// SecurityManager / NoiseSessionManager
+Log.e(TAG, "Handshake failed with $peerID: ${e.message}")
+Log.d(TAG, "Expiring stale handshake with $peerID")
+```
+
+Esos son `android.util.Log`, que van a **logcat**. El console pinta
+`DebugSettingsManager.DebugMessage`, que es otro sistema. **No hay relación.**
+
+Así que en el panel **nunca** aparecerá un `Handshake failed`, ni aunque
+falle. Scrollear más no da nada: el dato no viaja por ese canal.
+
+#### Para la próxima: lo que se lee sin USB
+
+Si hay que mirar dentro de la app sin `adb`, estos son los sitios, y son los
+únicos:
+
+| Dónde | Qué se lee |
+|---|---|
+| Connected devices | `peer_id • MAC • direct` — la condición de §3.14, desde dentro |
+| Mesh topology | `peerID.take(8) • nickname`, alimentado por el
+  mismo punto del código que escribe el TLV `0x04` |
+| Debug console | el registro propio, con **Verbose logging** encendido |
+
+Y para el estado de Noise, la pantalla de huella de una **conversación
+privada**, que tiene un vocabulario propio:
+
+```
+fingerprint_status_uninitialized  -> "Not encrypted"        → no hay sesión
+fingerprint_status_handshaking   -> "Handshaking"          → se quedó a medias
+fingerprint_status_failed        -> "Handshake failed"     → lo intentó y falló
+fingerprint_status_verified      -> "Encrypted & verified" → sesión establecida
+fingerprint_start_handshake      -> "Start handshake"      → botón disponible
+```
+
+#### El aviso de §3.9 sigue en pie
+
+`about_panic_desc` = *"Triple-tap to clear all data"*, y en el código
+`onTripleClick = onPanicClear`. **Tres toques en el logo borran todo.** No tocar.
+
+Y `about_background_desc` = *"Keep mesh active when app is closed"* — el
+servicio en primer plano está activo, así que el reloj que manda es el de
+`STALE_PEER_TIMEOUT_MS` (3 min), no el del ciclo de vida de la app.
+
+### 3.18 El USB no es un problema de configuración
+
+**2026-10-06.** `adb` instalado correctamente, daemon arrancando bien, pero
+`adb devices` vacío.
+
+La comprobación que decide es `lsusb`, y el móvil **no aparece**:
+
+```
+Bus 003 Device 006: 0bda:4853 Realtek ... Bluetooth Radio  <- nuestra radio, no el móvil
+```
+
+Con **dos cables distintos** y dos puertos. Ni aparece, y no hay `unauthorized`:
+simplemente no hay enumeración USB.
+
+Y no es que esté en "solo carga": un teléfono en modo de carga **sí**
+aparece en `lsusb`, porque el modo afecta a si se puede explorar archivos (MTP),
+no a si el dispositivo se enumera. `adb` funciona sin MTP.
+
+Lo que descarta esto de golpe, porque son de software:
+
+- depuración USB apagada
+- el diálogo de autorización que no salió
+- permisos de udev
+
+**Es físico: cable, puerto o conector.** Dos cables no lo arreglan.
+
+Y el razonamiento que casi lleva por mal camino, anotado porque es fácil caer
+en él: que el móvil conecte por Bluetooth con TVs y parlantes **no dice
+nada del USB**. Son interfaces físicas distintas en el móvil: la radio va por
+el aire, el USB por los pines del conector. Un cable de carga lleva corriente y
+ni un dato, y la radio sigue funcionando igual.
+
 ---
 
 ## 4. Cómo arrancar
@@ -984,8 +1127,9 @@ saltan 14, que son los que necesitan `bleak`, `dbus_fast` o el motor de Noise.
 
 ### Estado al dejar esto (2026-10-06, commit `97ab24b`)
 
-**721 tests, exit 0, árbol limpio.** El enlace BLE llega hasta el `msg3` y está
-verificado contra la app real. Lo único que falta es el `0x11`.
+**744 tests, exit 0, árbol limpio.** El enlace BLE llega hasta el `msg3`, y desde
+§3.17 está verificado **con el log de la app como testigo**, no solo con nuestros
+bytes. Lo único que falta es el `0x11`.
 
 ```
 announce firmado y aceptado        ✓   §3.12, §3.13
@@ -1003,6 +1147,20 @@ msg3 de 64 B, split() correcto     ✓   §3.16   (sale en ~1 s, no en 20)
 
 **Es el único paso que falta.** El handshake está cerrado de nuestro lado; lo que
 no está probado es que el de la app lo esté también.
+
+#### Cómo se entra al panel de debug
+
+Para cuando haya que mirar dentro de la app **sin `adb`**, que es como se hizo en
+§3.17:
+
+1. Abrir **About** desde la cabecera. Es el panel de ajustes de siempre.
+2. Bajar hasta **Debug Settings** (`about_debug_settings`).
+3. En la hoja nueva, **activar Verbose logging** antes de nada.
+4. **Debug console**: aquí salen los paquetes entrantes.
+
+Lo que ahí se lee, y qué dice cada cosa, está en §3.17. Y su límite, que
+importa: **el console solo pinta `DebugSettingsManager`, no `android.util.Log`**, así
+que ningún fallo de Noise aparecerá ahí. Para eso hace falta `logcat`.
 
 #### Antes de escribir código: una pregunta que no cuesta una ejecución
 
