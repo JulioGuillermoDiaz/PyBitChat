@@ -160,6 +160,147 @@ class TestNombresDeLosFlags(unittest.TestCase):
         self.assertIn("(ninguno)", texto)
 
 
+class TestVerificarFirma(unittest.TestCase):
+    """La clave de firma va en el propio announce, así que no hay excusa.
+
+    Y a mano sale mal: el 2026-10-06 se copiaron el preimagen y la firma del
+    terminal a un fichero y la verificación dio que no validaba, cuando lo que
+    pasaba es que la preimagen transcrita medía 102 B y la aritmética decía 100.
+    Un cálculo sobre hex pegado es una fuente de números falsos.
+    """
+
+    def _anuncio_con_firma_valida(self):
+        """Announce firmado de verdad, con la firma hecha por nuestro código."""
+        from pybitchat.protocol.identity import Identity, IdentityAnnouncement
+        from pybitchat.protocol.packet import Packet, PacketHeader, pkcs7_pad_to_bucket
+        from pybitchat.protocol.types import MessageType, PacketFlags
+
+        import dataclasses
+
+        ident = Identity.generate("anewells74")
+        carga = IdentityAnnouncement(
+            nickname=ident.nickname,
+            noise_public_key=ident.noise_public,
+            signing_public_key=ident.signing_public,
+        ).to_bytes()
+        cabecera = PacketHeader(
+            version=1, raw_type=int(MessageType.ANNOUNCE), ttl=7,
+            timestamp=0x01_0C_27_71_0C,
+            flags=PacketFlags.HAS_SIGNATURE, payload_len=len(carga),
+        )
+        sin_firma = Packet(header=cabecera, sender_id=ident.peer_id,
+                           payload=carga)
+        # Se firma `to_binary_data_for_signing()`, **no** `to_bytes()`.
+        # No son lo mismo: la preimagen pone el TTL a 0 y quita la firma, y
+        # `to_bytes()` deja el TTL intacto. Firmar el segundo y validar contra
+        # el primero da una firma que no valida, que es lo que pasó con la
+        # primera versión de este test.
+        #
+        # Y la firma se añade al `Packet`, no se pega al final: pegada a mano,
+        # `Packet.from_bytes` la leeria como ausente.
+        firma = ident.sign(sin_firma.to_binary_data_for_signing())
+        firmado = dataclasses.replace(sin_firma, signature=firma)
+        return pkcs7_pad_to_bucket(firmado.to_bytes(include_padding=False))
+
+    def test_una_firma_hecha_por_nosotros_valida(self):
+        """El caso bueno: nuestra propia firma verifica con nuestra clave."""
+        p = probe.Packet.from_bytes(self._anuncio_con_firma_valida())
+        texto = "\n".join(probe.describir_anuncio(p))
+        self.assertIn(">>> VALIDA", texto)
+
+    def test_una_firma_alterada_no_valida(self):
+        """Si la firma está tocada, tiene que decir que no."""
+        crudo = bytearray(self._anuncio_con_firma_valida())
+        # el byte 120 cae dentro de los 64 de firma (102..165)
+        crudo[120] ^= 0xFF
+        p = probe.Packet.from_bytes(bytes(crudo))
+        texto = "\n".join(probe.describir_anuncio(p))
+        self.assertIn("NO VALIDA", texto)
+
+    def test_sin_firma_no_llega_a_verificar(self):
+        """El announce nuestro va por la rama de "SIN FIRMA", que ya explica
+        que la app lo rechaza. No llega al verificador, y no debe."""
+        texto = "\n".join(probe.describir_anuncio(
+            probe.Packet.from_bytes(_anuncio_nuestro())))
+        self.assertIn("SIN FIRMA", texto)
+        self.assertNotIn("preimagen", texto)
+
+    def test_firmado_sin_tlv_03_lo_dice_y_no_revienta(self):
+        """Firmado pero sin la clave publica en el announce: no hay con que
+        comprobarlo. Se dice, no se lanza."""
+        import dataclasses
+        from pybitchat.protocol.identity import Identity
+        from pybitchat.protocol.packet import Packet, PacketHeader
+        from pybitchat.protocol.types import MessageType, PacketFlags
+
+        ident = Identity.generate("anewells74")
+        carga = (b"\x01\x0anewells74"
+                 + b"\x02\x20" + ident.noise_public)      # sin TLV 0x03
+        p = Packet(
+            header=PacketHeader(version=1, raw_type=int(MessageType.ANNOUNCE),
+                                ttl=7, timestamp=1,
+                                flags=PacketFlags.HAS_SIGNATURE,
+                                payload_len=len(carga)),
+            sender_id=ident.peer_id, payload=carga,
+        )
+        firmado = dataclasses.replace(p, signature=bytes(64))
+        texto = "\n".join(probe.describir_anuncio(firmado))
+        self.assertIn("no hay clave de firma", texto.lower())
+
+    def test_dice_la_composicion_de_la_preimagen(self):
+        """Si valida, hay que decir de qué consta, para poder reproducirla."""
+        p = probe.Packet.from_bytes(self._anuncio_con_firma_valida())
+        texto = "\n".join(probe.describir_anuncio(p))
+        self.assertIn("12 cabecera", texto)
+        self.assertIn("el TTL puesto a 0", texto)
+        self.assertIn("sin relleno", texto)
+
+    def test_el_ttl_de_la_preimagen_es_cero(self):
+        """La regla del TTL, comprobada sobre los bytes de la preimagen."""
+        p = probe.Packet.from_bytes(self._anuncio_con_firma_valida())
+        pre = p.to_binary_data_for_signing()
+        self.assertEqual(pre[2], 0, "el TTL tiene que estar a 0 al firmar")
+        self.assertEqual(p.header.ttl, 7, "el paquete si lleva TTL 7")
+
+    def test_la_preimagen_no_lleva_la_firma(self):
+        p = probe.Packet.from_bytes(self._anuncio_con_firma_valida())
+        self.assertIsNotNone(p.signature, "el announce deberia ir firmado")
+        pre = p.to_binary_data_for_signing()
+        self.assertNotIn(p.signature, pre)
+        self.assertEqual(len(pre), 22 + len(p.payload))
+
+    def test_lo_que_se_firma_no_es_lo_que_se_manda(self):
+        """La diferencia que hizo fallar la primera versión, medida.
+
+        `to_binary_data_for_signing()` pone el TTL a 0; `to_bytes()` no. Si se
+        firma el segundo, la firma no valida contra el primero.
+        """
+        from pybitchat.protocol.identity import Identity, IdentityAnnouncement
+        from pybitchat.protocol.packet import Packet, PacketHeader
+        from pybitchat.protocol.types import MessageType
+
+        ident = Identity.generate("x")
+        carga = IdentityAnnouncement(
+            nickname="x", noise_public_key=ident.noise_public,
+            signing_public_key=ident.signing_public,
+        ).to_bytes()
+        p = Packet(
+            header=PacketHeader(version=1, raw_type=int(MessageType.ANNOUNCE),
+                                ttl=7, timestamp=1_000, flags=0,
+                                payload_len=len(carga)),
+            sender_id=ident.peer_id, payload=carga,
+        )
+        self.assertNotEqual(p.to_bytes(include_padding=False),
+                            p.to_binary_data_for_signing())
+        self.assertEqual(p.to_binary_data_for_signing()[2], 0)
+
+    def test_el_anuncio_de_prueba_va_realmente_firmado(self):
+        """Guardia: si el helper vuelve a dejar la firma fuera, todo lo demas
+        de esta clase mide un announce sin firmar y no sirve."""
+        p = probe.Packet.from_bytes(self._anuncio_con_firma_valida())
+        self.assertEqual(len(p.signature), 64)
+
+
 class TestLeerPaquetes(unittest.TestCase):
     def test_lee_tres_anounces_seguidos(self):
         datos = _anuncio_app() * 3

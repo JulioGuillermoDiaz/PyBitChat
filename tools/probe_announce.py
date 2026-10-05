@@ -28,10 +28,7 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ / "src"))
 
-from pybitchat.protocol.identity import (  # noqa: E402
-    IdentityAnnouncement,
-    peer_id_from_noise_key,
-)
+from pybitchat.protocol.identity import peer_id_from_noise_key  # noqa: E402
 from pybitchat.protocol.packet import Packet, ProtocolError  # noqa: E402
 from pybitchat.protocol.types import MessageType, PacketFlags  # noqa: E402
 
@@ -225,9 +222,61 @@ def describir_anuncio(p: Packet, largo_cable: int | None = None) -> list[str]:
         l.append(f"    preimagen = {len(pre)} B")
         l.append(f"      {pre.hex()}")
         l.append("")
-        l.append("    Verificarla exige la clave de firma del announce, que va")
-        l.append("    en el TLV 0x03. Con eso se puede comprobar si la")
-        l.append("    preimagen incluye el TLV completo o solo lo que va antes.")
+        l.extend(_verificar(p, pre))
+    return l
+
+
+def _verificar(p: Packet, preimagen: bytes) -> list[str]:
+    """Comprueba la firma del announce con la clave del propio TLV 0x03.
+
+    ## Por qué aquí y no a mano
+
+    La clave de firma **va en el announce**. No hace falta nada de fuera: el
+    paquete lleva su propia prueba.
+
+    Y a mano sale mal. El 2026-10-06 se copiaron el preimagen y la firma del
+    terminal a un fichero y la verificación dio que no validaba, cuando lo que
+    pasaba es que la preimagen transcrita medía 102 B y la aritmía decía 100:
+    faltaba un byte. Un cálculo sobre hex pegado es una fuente de números
+    falsos, y por eso esto lee el fichero.
+
+    ## Qué comprueba además del resultado
+
+    Que la preimagen mida lo que tiene que medir. `to_binary_data_for_signing()`
+    quita la firma y fija el TTL, así que si el resultado no valida lo que se
+    compara está mal, no la firma.
+    """
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    tlvs = dict(_tlvs(p.payload))
+    clave = tlvs.get(0x03)
+    if clave is None or len(clave) != 32:
+        return ["    no hay clave de firma (TLV 0x03) con la que comprobar"]
+
+    l: list[str] = []
+    try:
+        Ed25519PublicKey.from_public_bytes(clave).verify(p.signature, preimagen)
+    except InvalidSignature:
+        l.append("    >>> NO VALIDA con esta preimagen")
+        l.append("")
+        l.append("    Con la firma y la preimagen correctas, si no valida")
+        l.append("    el problema es la preimagen, no la firma:")
+        l.append("    fija el TTL y quita la firma, y hay que confirmar que")
+        l.append("    hace lo mismo que `BitchatPacket.toBinaryDataForSigning`.")
+        return l
+
+    l.append("    >>> VALIDA")
+    l.append("")
+    l.append("    La preimagen es exactamente el paquete entero con:")
+    l.append("      - la firma fuera")
+    l.append("      - el TTL puesto a 0")
+    l.append("      - sin relleno")
+    l.append(f"      - {len(preimagen)} B = 12 cabecera + 8 sender + "
+             f"{len(p.payload)} payload")
+    l.append("")
+    l.append("    Esto es lo que hay que producir para que la app acepte")
+    l.append("    nuestro announce. No hay que deducir nada más.")
     return l
 
 
