@@ -344,30 +344,63 @@ en `MessageHandler.kt` antes de culpar al BLE.
 
 ---
 
-### 3.9 El characteristic no aparece, y el MTU se queda en 23
+### 3.9 El characteristic no aparece, y el MTU se queda en 23 → **ERA EL MÓVIL**
 
-**Abierto el 2026-10-05. Del entorno, no del código.** Dos sesiones seguidas, con
-el móvil reiniciado y en primer plano:
+**Resuelto el 2026-10-05 reiniciando el teléfono entero.** Tres sesiones
+seguidas con el mismo síntoma, dos reinicios de la app y uno de Bluetooth sin
+cambio. El teléfono entero lo arregló a la primera: 2 candidatos y MTU 517.
 
-| | Antes (4 sesiones, todas bien) | Ahora (2 sesiones) |
-|---|---|---|
-| candidatos con el UUID de BitChat | 2-3 | **1** |
-| MTU | **517** | **23** |
-| characteristic servido | sí | **no** |
-| `_acquire_mtu` | bien | `coroutine raised StopIteration` |
-| handshake | msg2 + msg3 | ni llega a enviarse |
+Así que la regla de los 15 min **no** cubría este caso: había que forzar el
+cierre de la app, y con reiniciar BitChat no bastaba. Del entorno, no nuestro.
 
-**El aviso de MTU y el characteristic ausente son casi siempre la misma cosa.** Un
-envío que no cabe **no da error**: no llega y no se sabe por qué. Por eso el
-script avisa de los dos por separado.
+Lo que quedó de él, y **sí** sirve:
 
-Lo que **no** se sabe: por qué la app anuncia pero no sirve GATT, y por qué la
-negociación de MTU falla. Con un solo candidato y MTU 23 la hipótesis más
-barata es que el móvil está en un estado en el que publica el anuncio y no levanta
-el GATT. Reiniciar BitChat **no** lo ha arreglado; lo siguiente a probar es apagar
-y encender el Bluetooth, o el airplane mode.
+| Síntoma | Lo que era |
+|---|---|
+| MTU 23 | `_acquire_mtu()` falló; BlueZ se queda en su valor por defecto |
+| characteristic ausente | el GATT server de la app no levantó en esa conexión |
+| **1 solo candidato** | la app anunció con una dirección en vez de 2-3 |
 
-### 3.10 Un doble de test que valida el error
+Las dos cosas van juntas siempre: un envío que no cabe **no da error**, no llega
+y no se sabe por qué. Por eso `smoke_ble.py` avisa de las dos.
+
+**El antecedente, para no perderlo:** con el móvil así, el fallo de MTU y el de
+GATT son **la misma causa**, y se ven juntos. Ver el `AVISO` de `smoke_ble.py`, que
+los menciona el uno al otro por si aparece solo uno.
+
+### 3.10 Un `MESSAGE` de 1 byte que no es un mensaje → PISTA NUEVA
+
+**El 2026-10-05, y solo se ha visto una vez.** Es lo primero que llega **después**
+de mandar nuestro `msg3`:
+
+```
+tipo=0x02(MESSAGE/KEY_EXCHANGE)  ttl=7  payload=1 B
+sender=34e01ccea10a8c6d        recipient=ff:ff:ff:ff:ff:ff:ff:ff
+```
+
+Lo que se sabe, y está comprobado contra `BitchatMessage.kt`:
+
+- El payload de `MESSAGE` es `[flags:1][timestamp:8][idLen:1][id][senderLen:1]
+  [sender][contentLen:2][content]` y **mínimo 13 bytes**. Por eso nuestro
+  decodificador lo rechaza, y con razón: `fromBinaryPayload` devuelve `null`
+  también en la app.
+- Llega **1 byte**, `0x32`. Como flags sería `isPrivate | senderPeerID |
+  mentions`, pero sin cuerpo: un mensaje truncado.
+- El `recipient` es **todo unos**. Eso no es un `peer_id` de nadie; tiene que ser
+  un marcador de broadcast.
+
+**Lo que no se sabe**, y es lo que hay que mirar:
+
+- Si el byte `0x32` es un tipo de mensaje interno o un flags de verdad.
+- Si el broadcast de todo unos aparece en el código de la app y dónde se usa.
+- **Si es consecuencia de nuestro `msg3`** o habría aparecido igual. Solo se ha
+  visto en la ventana posterior al `msg3`, y **n=1**: no es evidencia.
+
+Es la primera señal de que la app reacciona a nuestro `msg3`. No es prueba de que
+los dos lados estén establecidos, pero es lo más parecido que tenemos. Los bytes
+están en `capturas/recibido.bin` para trabajar sobre ellos.
+
+### 3.11 Un doble de test que valida el error
 
 `BleakGATTServiceCollection` **no tiene `__len__`**, y `_sin_characteristic` hacía
 `len(cliente.services)`. Con un cliente real lanzaba `TypeError`. El test pasaba,
