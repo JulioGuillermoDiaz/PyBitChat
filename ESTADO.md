@@ -368,37 +368,71 @@ y no se sabe por qué. Por eso `smoke_ble.py` avisa de las dos.
 GATT son **la misma causa**, y se ven juntos. Ver el `AVISO` de `smoke_ble.py`, que
 los menciona el uno al otro por si aparece solo uno.
 
-### 3.10 Un `MESSAGE` de 1 byte que no es un mensaje → PISTA NUEVA
+### 3.10 El `MESSAGE` de 1 byte: **el broadcast, y nuestro decodificador está mal**
 
-**El 2026-10-05, y solo se ha visto una vez.** Es lo primero que llega **después**
-de mandar nuestro `msg3`:
+**Resuelto el 2026-10-05 leyendo `MessageHandler.kt`.** Eran dos cosas, y una
+era **nuestro bug**.
 
+### 1. `ff:ff:ff:ff:ff:ff:ff:ff` es el marcador de broadcast
+
+`MessageHandler.handleMessage`:
+
+```kotlin
+val recipientID = packet.recipientID?.takeIf { !it.contentEquals(
+    delegate?.getBroadcastRecipient()) }
+if (recipientID == null) {
+    handleBroadcastMessage(routed)     // BROADCAST
+} else if (recipientID.toHexString() == myPeerID) {
+    handlePrivateMessage(packet, peerID)   // PARA NOSOTROS
+}
 ```
-tipo=0x02(MESSAGE/KEY_EXCHANGE)  ttl=7  payload=1 B
-sender=34e01ccea10a8c6d        recipient=ff:ff:ff:ff:ff:ff:ff:ff
+
+Así que todo unos no es el `peer_id` de nadie: es `getBroadcastRecipient()`.
+El paquete iba **para toda la malla**, no para nosotros.
+
+### 2. Un `MESSAGE` de broadcast lleva **texto plano**, no TLV → **nuestro bug**
+
+`handleBroadcastMessage`, al final:
+
+```kotlin
+val message = BitchatMessage(
+    ...
+    content = String(packet.payload, Charsets.UTF_8),
+    ...
+)
 ```
 
-Lo que se sabe, y está comprobado contra `BitchatMessage.kt`:
+**El payload es UTF-8 crudo.** Y `handlePrivateMessage` hace lo mismo.
 
-- El payload de `MESSAGE` es `[flags:1][timestamp:8][idLen:1][id][senderLen:1]
-  [sender][contentLen:2][content]` y **mínimo 13 bytes**. Por eso nuestro
-  decodificador lo rechaza, y con razón: `fromBinaryPayload` devuelve `null`
-  también en la app.
-- Llega **1 byte**, `0x32`. Como flags sería `isPrivate | senderPeerID |
-  mentions`, pero sin cuerpo: un mensaje truncado.
-- El `recipient` es **todo unos**. Eso no es un `peer_id` de nadie; tiene que ser
-  un marcador de broadcast.
+Eso significa que nuestro `MessagePayload` — que exige `[flags][timestamp][idLen]
+[senderLen][contentLen]...` y un mínimo de 13 bytes, según `BitchatMessage.kt`
+— **rechaza mensajes legítimos de la app**. `fromBinaryPayload` no aparece en
+ninguna ruta de recepción: el formato binario existe en el modelo pero no se
+usa en el cable para recibir.
 
-**Lo que no se sabe**, y es lo que hay que mirar:
+Ese queda pendiente de arreglar. El paquete que nos llegó tiene 1 byte, `0x32`,
+que como texto es el carácter **`2`**.
 
-- Si el byte `0x32` es un tipo de mensaje interno o un flags de verdad.
-- Si el broadcast de todo unos aparece en el código de la app y dónde se usa.
-- **Si es consecuencia de nuestro `msg3`** o habría aparecido igual. Solo se ha
-  visto en la ventana posterior al `msg3`, y **n=1**: no es evidencia.
+### Lo que este paquete **no** demuestra
 
-Es la primera señal de que la app reacciona a nuestro `msg3`. No es prueba de que
-los dos lados estén establecidos, pero es lo más parecido que tenemos. Los bytes
-están en `capturas/recibido.bin` para trabajar sobre ellos.
+**No prueba que los dos lados tengan la sesión establecida.** Es un mensaje de
+malla en **claro**, no un `NOISE_ENCRYPTED`. La vía que lo demostraría es
+`handleNoiseEncrypted`, que exige `recipientID == myPeerID` — y nunca ha llegado
+ninguno.
+
+Además, `handleBroadcastMessage` exige que el emisor sea un par **verificado**
+(`peerInfo.isVerifiedNickname`). Nosotros nunca nos hemos anunciado, así que aunque
+quisiéramos aceptarlo no podríamos.
+
+### Lo que queda sin saber
+
+- Por qué la app difunde un carácter `2`. **n=1**, así que no es evidencia de
+  que reaccione a nuestro `msg3`.
+- Si el texto plano hay que aceptarlo **en lugar de** el TLV o **además** de él.
+  El código de la app solo sugiere "en lugar de", pero `toBinaryPayload()` existe y
+  no se usa en recepción: si algún lo emitiera, habría que distinguir.
+
+Los bytes están en `capturas/recibido.bin`.
 
 ### 3.11 Un doble de test que valida el error
 
