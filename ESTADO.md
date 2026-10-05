@@ -35,7 +35,9 @@ con lectura del código.
 | Firma Ed25519 de la app | ✅ preimagen deducida, valida |
 | **`msg1` Noise XX aceptado por la app** | ✅ **32 B, 6 de 9 sesiones** |
 | **`msg2` descifrado y verificado** | ✅ **Poly1305 válido, `s` = la del announce** |
-| **`msg3` construido y enviado** | ✅ **64 B, `split()` correcto**, 2 veces |
+| **`msg3` construido y enviado** | ✅ **64 B, `split()` correcto**, en ~1 s |
+| **Announce firmado y aceptado** | ✅ **§3.12, §3.13** — la app nos gossipea |
+| **Observado como par directo** | ✅ **§3.14** — TLV `0x04` con nuestro `peer_id` |
 | `NOISE_ENCRYPTED` (`0x11`) | ❌ nunca enviado ni recibido |
 | Servidor GATT (la app conecta a nosotros) | ❌ no implementado |
 
@@ -72,8 +74,34 @@ en Noise XX el tercer mensaje no tiene respuesta. Por eso no llegó ningún
 que es lo normal cuando no tiene nada cifrado que decir. **Su silencio no es un
 fallo, y no es prueba de nada.**
 
-La prueba de que los dos lados están establecidos es **enviar un `0x11` propio
-y ver si la app lo descifra**. Ver §5.
+### Lo que sí se añadió después, y cómo se mide
+
+El 2026-10-06 (§3.12 a §3.16) se cerraron cuatro cosas más, todas verificadas:
+
+- El announce **firmado**, con la preimagen correcta. Comprobado contra la firma
+  de **la propia app**: `probe_announce.py` dice `>>> VALIDA con relleno`.
+- El **TTL 7**, sin el cual la app acepta el announce pero no lo observa como
+  enlace directo, y por tanto no nos cuenta (§3.14).
+- El `peer_id` de la app **aprendido de su announce firmado** y comprobado contra
+  su clave Noise, en vez de escrito a mano (§3.15).
+- El `msg3` que sale **en cuanto llega el `msg2`**, no tras el plazo entero
+  (§3.16).
+
+El medidor de todo esto es el **TLV `0x04`** del announce de la app: lleva nuestro
+`peer_id` si y solo si nos tiene como par verificado **y** con conexión directa.
+Sale de:
+
+```kotlin
+val verifiedDirect = peerManager.getVerifiedPeers()
+    .filter { it.value.isDirectConnection }
+    .keys
+```
+
+Esas dos condiciones son justo las que exigen la firma (§3.12) y el TTL 7 (§3.14),
+así que ese TLV es la prueba de ambas a la vez. Caduca a los 3 minutos.
+
+La prueba de que **los dos lados** tienen sesión establecida sigue siendo el
+`0x11`. Ver §5.
 
 ### El intercambio de identidad, desde el 2026-10-03
 
@@ -954,16 +982,65 @@ saltan 14, que son los que necesitan `bleak`, `dbus_fast` o el motor de Noise.
 
 ## 5. Por dónde seguir
 
+### Estado al dejar esto (2026-10-06, commit `97ab24b`)
+
+**721 tests, exit 0, árbol limpio.** El enlace BLE llega hasta el `msg3` y está
+verificado contra la app real. Lo único que falta es el `0x11`.
+
+```
+announce firmado y aceptado        ✓   §3.12, §3.13
+observado como par directo         ✓   §3.14   (TLV 0x04 con nuestro peer_id)
+peer_id de la app, aprendido       ✓   §3.15   (del announce firmado, comprobado)
+msg1 con el destinatario correcto  ✓   §3.15
+msg2 de 96 B, Poly1305 válido      ✓
+s descifrada = clave de la app     ✓   IGUAL
+peer_id derivado                   ✓   IGUAL
+msg3 de 64 B, split() correcto     ✓   §3.16   (sale en ~1 s, no en 20)
+0x11 recibido                      ✗
+```
+
 ### Lo siguiente: `NOISE_ENCRYPTED` (`0x11`)
 
-**Es el paso que falta para poder hablar con la app a través de ella.** El
-handshake está cerrado de nuestro lado; lo que no está probado es que el de la app
-lo esté también.
+**Es el único paso que falta.** El handshake está cerrado de nuestro lado; lo que
+no está probado es que el de la app lo esté también.
 
-La prueba es una sola: **mandar un `0x11` y ver si la app lo descifra.** Si lo
-descifra, los dos lados estaban establecidos y las claves coinciden.
+#### Antes de escribir código: una pregunta que no cuesta una ejecución
 
-El soporte ya existe:
+**¿El móvil muestra el icono de candado junto a nuestro peer?** La app lo pinta
+cuando `hasEstablishedSession(peerID)`, es decir cuando hay sesión Noise
+establecida (`MeshCore.shouldShowEncryptionIcon`).
+
+Eso parte el problema en dos, y son dos trabajos distintos:
+
+| | Significa | Qué hacer |
+|---|---|---|
+| **hay candado** | sesión establecida; el `0x11` no sale por otra razón | instrumentar por qué no se emite |
+| **no hay candado** | la app nunca completó el handshake | eso es lo que hay que arreglar |
+
+Ojo con la pantalla: la de la app que sale en la captura es la de **canales**
+(`mesh [0 personas]`, Cuadra/Barrio/Región). No es la lista de pares. `mesh [0
+personas]` mide participantes del canal, no pares del mesh, así que **no sirve
+para medir nada de esto**.
+
+#### Si no hay candado: dos hipótesis, ninguna confirmada
+
+Al leer `msg3` la app necesita que `processHandshakeMessageWithResult` devuelva
+`establishedNow = true`. Descartadas:
+
+- TTL del `msg1`/`msg3`: ya es 7, y `isDirectIngress` da `true` (§3.16).
+- El `exchangeKey` de deduplicación: son los 16 primeros bytes del payload, y
+  nuestro `msg3` empieza por su `s` cifrada, que cambia cada vez.
+
+Sin descartadas quedan dos, y **no hay dato que las separe**:
+
+1. La app procesó el `msg3` pero algo anterior en la cadena devolvió `null`.
+2. La app nunca vio el `msg3`.
+
+La puerta de entrada es `SecurityManager.handleNoiseHandshake`. Ahí el log de la
+app es lo que decide, y es de los pocos sitios donde `logcat` da la respuesta
+directa.
+
+#### El soporte que ya existe
 
 - `NoiseTransportCipher.encrypt()` antepone el nonce de 4 B en **big-endian**, que
   es lo que espera `NoiseSession.kt:133-143`. El nonce AEAD de 12 B va en
@@ -975,6 +1052,13 @@ El soporte ya existe:
 Lo que **no** se haría sin decidir: mandar mensajes de verdad, ficheros o voz.
 Todo eso va dentro del `0x11`, así que el formato del payload se decide una vez y
 se reutiliza.
+
+#### El camino que NO se debe tomar primero
+
+**No mandar un `0x11` nuestro para "ver si lo descifra".** Si la sesión no está
+establecida en su lado, no lo va a descifrar, y entonces no sabremos si falló el
+`0x11` o la sesión. Sería un dato que no separa nada — exactamente el fallo que
+causó el `msg3` tardío (§3.16). Primero hay que saber si la sesión existe.
 
 ### Lo que quedó abierto, en orden de irrelevancia
 
@@ -991,11 +1075,31 @@ se reutiliza.
    quiere ni si hay que contestar. Al día de la sesión completa puede empezar a
    importar.
 
+### Cómo se mide el avance, y cómo no
+
+**Medidor bueno — en la traza, sin tocar el móvil:**
+
+El announce de la app lleva o no lleva nuestro `peer_id` en el TLV `0x04`, y eso
+vale en las dos direcciones:
+
+- **con** él: nos tiene como par verificado *y* con conexión directa.
+- **sin** él: no, o se nos pasó el plazo.
+
+Es un pulso con **caducidad de 3 minutos** (`STALE_PEER_TIMEOUT_MS`), así que hay
+que mirarlo dentro de la misma ejecución.
+
+**Medidor malo — `mesh [0 personas]`.** Es la pantalla de canales, no la de pares,
+y mide otra cosa.
+
 ### Lo que **no** se debe rehacer
 
 - El `msg1` de 32 B. Correcto, y verificado por el Poly1305 del `msg2`.
 - El `msg2` de 96 B. Correcto, y verificado descifrándolo.
 - El `msg3` de 64 B. Correcto, y `split()` funciona.
+- La firma del announce. Correcta, y **verificada contra la firma de la propia
+  app** con `probe_announce.py` (`>>> VALIDA con relleno`).
+- El TTL 7 del announce. Es lo que exige `DirectLinkAnnouncementPolicy`, sin el
+  cual no hay observación de alcance (§3.14).
 - `should_pad_for_ble()`. Se dejó como está a pesar de la contradicción con el
   tráfico capturado: seguir el código es lo verificable. Ver §3.5.
 
