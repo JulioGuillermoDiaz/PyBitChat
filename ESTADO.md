@@ -1022,6 +1022,41 @@ Ojo con la pantalla: la de la app que sale en la captura es la de **canales**
 personas]` mide participantes del canal, no pares del mesh, así que **no sirve
 para medir nada de esto**.
 
+#### La herramienta: `probe_logcat.py`
+
+Es lo que resuelve la pregunta de una sentada. Lanza `logcat` **antes** que
+`smoke_ble` (si no, se pierden las lineas del announce), corre el `smoke_ble`,
+guarda **todo** el log en `capturas/logcat.txt` y clasifica las lineas
+relevantes por el texto del mensaje, no por etiqueta.
+
+```bash
+./.venv/bin/python tools/probe_logcat.py -- \
+    --firmar --handshake --msg3 --identity /tmp/g.json
+```
+
+Hace falta `adb` en el host y el movil por **USB**, con depuracion activada. El
+USB lleva los logs y la radio sigue haciendo el BLE: no se estorban.
+
+Los cuatro veredictos posibles, y a que hipotesis de §5 corresponde cada uno:
+
+| Veredicto | Que descarta |
+|---|---|
+| `COMPLETO` | msg3, nonce, orden, derivacion. El fallo es otro |
+| `INTENTO y NO PUDO` | con el motivo en la linea. Es el dato buscado |
+| `NO LLEGO` | **todo lo de Noise**: se perdio antes |
+| `ni una linea util` | probablemente el filtro, no la app |
+
+Ese tercero es el mas valioso, porque descarta de golpe todo lo que se podria
+sospechar del `msg3`.
+
+Y un caso del que hay que ser cauto: **`ni una linea util` casi siempre quiere
+decir que el filtro se quedo corto**, no que la app estuvo callada. Las frases
+del filtro estan leidas del codigo de la app, no de su log real, y una ausencia
+es indistinguible de un evento que no ocurrio. Por eso se filtra por frases y
+se conservan los `WARN`/`ERROR` de cualquier etiqueta, y por eso
+`tests/test_probe_logcat.py` prueba que una frase mal escrita **falla** en vez
+de colarse.
+
 #### Si no hay candado: dos hipótesis, ninguna confirmada
 
 Al leer `msg3` la app necesita que `processHandshakeMessageWithResult` devuelva
