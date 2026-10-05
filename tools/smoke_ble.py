@@ -628,12 +628,19 @@ def _sin_characteristic(cliente) -> int:
     """
     print("\n  el teléfono anuncia BitChat pero no sirvió el characteristic.")
     print(f"    characteristic buscado: {CHARACTERISTIC_UUID}")
+    # `client.services` es un `BleakGATTServiceCollection`, que **no** tiene
+    # `__len__`: se recorre con `iter()`. Pasó el 2026-10-05 y el `len()` lanzó
+    # `TypeError` con un cliente real, mientras el test pasaba con un doble que
+    # sí lo tenía. Un doble que no copia la API real valida el error.
     servicios = getattr(cliente, "services", None)
     if servicios is not None:
         try:
-            print(f"    servicios descubiertos: {len(servicios)}")
-            for s in servicios:
+            lista = list(servicios)
+            print(f"    servicios descubiertos: {len(lista)}")
+            for s in lista:
                 print(f"      {s.uuid}  ({s.description})")
+                for c in getattr(s, "characteristics", ()):
+                    print(f"        - {c.uuid}  ({c.description})")
         except Exception as exc:
             print(f"    (no se pudieron listar: {type(exc).__name__}: {exc})")
     print()

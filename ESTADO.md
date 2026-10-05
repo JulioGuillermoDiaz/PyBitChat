@@ -344,6 +344,45 @@ en `MessageHandler.kt` antes de culpar al BLE.
 
 ---
 
+### 3.9 El characteristic no aparece, y el MTU se queda en 23
+
+**Abierto el 2026-10-05. Del entorno, no del código.** Dos sesiones seguidas, con
+el móvil reiniciado y en primer plano:
+
+| | Antes (4 sesiones, todas bien) | Ahora (2 sesiones) |
+|---|---|---|
+| candidatos con el UUID de BitChat | 2-3 | **1** |
+| MTU | **517** | **23** |
+| characteristic servido | sí | **no** |
+| `_acquire_mtu` | bien | `coroutine raised StopIteration` |
+| handshake | msg2 + msg3 | ni llega a enviarse |
+
+**El aviso de MTU y el characteristic ausente son casi siempre la misma cosa.** Un
+envío que no cabe **no da error**: no llega y no se sabe por qué. Por eso el
+script avisa de los dos por separado.
+
+Lo que **no** se sabe: por qué la app anuncia pero no sirve GATT, y por qué la
+negociación de MTU falla. Con un solo candidato y MTU 23 la hipótesis más
+barata es que el móvil está en un estado en el que publica el anuncio y no levanta
+el GATT. Reiniciar BitChat **no** lo ha arreglado; lo siguiente a probar es apagar
+y encender el Bluetooth, o el airplane mode.
+
+### 3.10 Un doble de test que valida el error
+
+`BleakGATTServiceCollection` **no tiene `__len__`**, y `_sin_characteristic` hacía
+`len(cliente.services)`. Con un cliente real lanzaba `TypeError`. El test pasaba,
+porque el doble **sí** tenía `__len__`: estaba modelado sobre lo que yo creía
+que era la API, no sobre lo que es.
+
+Un doble que se aparta de la API real valida el error en lugar de detectarlo. El
+doble ahora **no** lleva `__len__` a propósito, y hay un test que comprueba que
+sigue sin tenerlo, para que nadie lo añada por comodidad.
+
+Las tres llamadas del código van con `list()` y recorren `characteristics`, que es
+donde se busca el UUID.
+
+---
+
 ## 4. Cómo arrancar
 
 ### En el host Linux (donde está el Bluetooth)

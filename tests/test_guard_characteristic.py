@@ -64,33 +64,54 @@ def _cargar_smoke():
     return mod
 
 
-class _Servicio:
-    def __init__(self, uuid, descripcion="servicio"):
+class _Caracteristica:
+    def __init__(self, uuid, descripcion="característica"):
         self.uuid = uuid
         self.description = descripcion
 
 
-class _Servicios:
-    """Lo mínimo de `client.services` que usa el script.
+class _Servicio:
+    """Copia de `bleak.BleakGATTService`: `uuid`, `description`, `characteristics`."""
 
-    Con `__len__` e iteración porque `_sin_characteristic` los usa para listar lo
-    que sí hay: es la mitad del diagnóstico, dice si faltó el nuestro o
-    todos.
+    def __init__(self, uuid, descripcion="servicio", caracteristicas=()):
+        self.uuid = uuid
+        self.description = descripcion
+        self.characteristics = [_Caracteristica(c) for c in caracteristicas]
+
+    def get_characteristic(self, uuid):
+        for c in self.characteristics:
+            if str(c.uuid).lower() == str(uuid).lower():
+                return c
+        return None
+
+
+class _Servicios:
+    """Copia de `bleak.BleakGATTServiceCollection`.
+
+    ## Por qué este doble **no** tiene `__len__`
+
+    El 2026-10-05 el código hacía `len(cliente.services)` y con un cliente real
+    lanzaba `TypeError: object of type 'BleakGATTServiceCollection' has no
+    len()`. El test pasaba. **Porque este doble sí tenía `__len__`**: estaba
+    modelado sobre lo que creía que tenía la API, no sobre lo que tiene.
+
+    Un doble que se aparta de la API real valida el error. Así que aquí no lo
+    lleva, a propósito, y hay un test que lo comprueba.
     """
 
     def __init__(self, presentes=()):
-        self._presentes = [_Servicio(u) for u in presentes]
+        self.services = {i: s for i, s in enumerate(presentes)}
 
-    def __len__(self):
-        return len(self._presentes)
-
+    # Sin `__len__` a propósito. El que viene es el de `object`, que lanza
+    # `TypeError` como el real, y por eso el código se ve obligado a iterar.
     def __iter__(self):
-        return iter(self._presentes)
+        return iter(self.services.values())
 
     def get_characteristic(self, uuid):
-        for u in self._presentes:
-            if str(u.uuid).lower() == str(uuid).lower():
-                return u
+        for s in self.services.values():
+            c = s.get_characteristic(uuid)
+            if c is not None:
+                return c
         return None
 
 
@@ -263,11 +284,56 @@ class TestSinCharacteristic(unittest.TestCase):
     def test_lista_los_servicios_que_hay(self):
         """Cuando hay otros servicios, saber cuáles es la mitad del diagnóstico:
         dice si es "no sirvió el nuestro" o "no sirvió ninguno"."""
-        otros = _Servicios(["0000xxxx-0000-0000-0000-000000000001"])
+        otros = _Servicios([_Servicio("0000xxxx-0000-0000-0000-000000000001")])
         buf = io.StringIO()
         with redirect_stdout(buf):
             self.smoke._sin_characteristic(_cliente(otros))
         self.assertIn("0000xxxx", buf.getvalue())
+
+    def test_lista_los_characteristics_de_cada_servicio(self):
+        """El UUID del characteristic se busca ahí dentro. Si solo se listan
+        los servicios, no se puede decir si es lo que falta."""
+        servicio = _Servicio(
+            "0000xxxx-0000-0000-0000-000000000001",
+            caracteristicas=["a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d"],
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.smoke._sin_characteristic(_cliente(_Servicios([servicio])))
+        self.assertIn("a1b2c3d4", buf.getvalue())
+
+    def test_no_usa_len_del_coleccion(self):
+        """El bug: `BleakGATTServiceCollection` no tiene `__len__`.
+
+        Con el doble real, `len()` lanza. Si el código volviera a usarlo, este
+        test lo detecta; y con un cliente de verdad, también.
+        """
+        import inspect
+
+        fuente = inspect.getsource(self.smoke._sin_characteristic)
+        self.assertNotIn("len(servicios)", fuente)
+        self.assertIn("list(servicios)", fuente)
+
+    def test_el_doble_reproduce_la_api_real(self):
+        """Guardia: si el doble empieza a tener `__len__`, deja de servir.
+
+        Es el fallo que dejó pasar el código roto: el doble se modeló sobre
+        lo que creía la API, no sobre lo que tiene.
+        """
+        self.assertFalse(
+            hasattr(_Servicios, "__len__"),
+            "el doble tiene __len__ y bleak no: dejaria de detectar el bug",
+        )
+
+    def test_con_el_doble_real_no_revienta(self):
+        """El caso que pasó en el host: `list()` sobre una colección sin
+        `__len__` funciona, y el mensaje sale entero."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            codigo = self.smoke._sin_characteristic(_cliente(_Servicios()))
+        self.assertEqual(codigo, 1)
+        self.assertIn("servicios descubiertos: 0", buf.getvalue())
+        self.assertNotIn("no se pudieron listar", buf.getvalue())
 
     def test_no_atribuye_el_fallo_al_codigo(self):
         """Ninguno de los tres casos que lista es del lado nuestro."""
