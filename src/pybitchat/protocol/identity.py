@@ -69,7 +69,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from ..noise.primitives import DH_LEN, generate_x25519_private, x25519_public_from_private
-from .packet import Packet, PacketHeader, ProtocolError
+from .packet import Packet, PacketHeader, ProtocolError, pkcs7_pad_to_bucket
 from .types import PEER_ID_SIZE, PacketFlags
 
 #: Longitud de cada clave. Ambas son de 32 bytes.
@@ -351,14 +351,54 @@ class Identity:
             capabilities=self.capabilities,
         )
 
-    def announce_packet(self, *, ttl: int = 3, timestamp: int | None = None) -> bytes:
+    def announce_packet(
+        self,
+        *,
+        ttl: int = 3,
+        timestamp: int | None = None,
+        firmar: bool = False,
+    ) -> bytes:
         """El paquete `ANNOUNCE` completo, listo para escribir en GATT.
 
         El `sender_id` sale de la clave, así que el paquete es coherente consigo
-        mismo: quien lo reciba puede comprobar que el identificador corresponde a
-        la clave que announcea.
+        mismo: quien lo reciba puede comprobar que el identificador corresponde a la
+        clave que announcea.
+
+        ## `firmar`: por qué está apagado, y por qué hay que encenderlo
+
+        **Sin firma, la app nos descarta.** `MessageHandler.handleAnnounceWithResult`:
+
+        ```kotlin
+        val announcement = AnnouncementIdentityValidator.verify(packet, peerID)
+        if (announcement == null) {
+            return AnnounceHandlingResult.Rejected
+        }
+        ```
+
+        Y de ahí viene todo lo demás: sin registro como par no hay
+        `isVerifiedNickname`, y `handleBroadcastMessage` exige eso para aceptar un
+        mensaje nuestro. Es un bloqueo circular detrás de una línea.
+
+        Por eso está **apagado** y no por defecto: hasta el 2026-10-05 todos los
+        announces se mandaron sin firmar, así que encenderlo cambia el
+        comportamiento de las ejecuciones que se usan para otras cosas. Un flag
+        explícito hace visible el cambio.
+
+        ## Lo que se firma, y lo que no
+
+        Se firma `to_binary_data_for_signing()`: **el paquete con el TTL a 0 y sin
+        la firma**, no lo que se escribe en el cable. No son lo mismo, y firmar el
+        segundo produce una firma que no valida contra el primero.
+
+        ## Relleno
+
+        Sin firmar son 111 B y no se rellena. Con firma son 175 B y **sí** se
+        rellena a 256, como el announce de la app: su `BLEPacketPaddingPolicy` no
+        incluye el ANNOUNCE, pero el announce real llega en 256, así que sin
+        relleno hay una diferencia de comportamiento que no está medida.
         """
         carga = self.announcement().to_bytes()
+        import dataclasses
         import time
 
         cabecera = PacketHeader(
@@ -369,9 +409,13 @@ class Identity:
             flags=PacketFlags(0),
             payload_len=len(carga),
         )
-        return Packet(
-            header=cabecera, sender_id=self.peer_id, payload=carga
-        ).to_bytes()
+        paquete = Packet(header=cabecera, sender_id=self.peer_id, payload=carga)
+        if not firmar:
+            return paquete.to_bytes(include_padding=False)
+
+        preimagen = paquete.to_binary_data_for_signing()
+        firmado = dataclasses.replace(paquete, signature=self.sign(preimagen))
+        return pkcs7_pad_to_bucket(firmado.to_bytes(include_padding=False))
 
     # -- firma --------------------------------------------------------------
 

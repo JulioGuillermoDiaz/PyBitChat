@@ -459,6 +459,76 @@ donde se busca el UUID.
 
 ---
 
+### 3.12 El announce sin firma: por qué no aparecéamos en su lista
+
+**Resuelto el 2026-10-06.** Es la causa de todo lo que quedaba colgando.
+
+`Identity.announce_packet` construye el announce con `flags=PacketFlags(0)`:
+**sin firmar**. Y la app lo descarta:
+
+```kotlin
+// MessageHandler.handleAnnounceWithResult
+val announcement = AnnouncementIdentityValidator.verify(packet, peerID) {
+    sig, data, key -> delegate?.verifyEd25519Signature(sig, data, key) ?: false
+}
+if (announcement == null) {
+    // "Rejecting malformed, unbound, or invalidly signed ANNOUNCE"
+    return AnnounceHandlingResult.Rejected
+}
+```
+
+### El bloqueo circular
+
+```
+nó verificamos  ->  la app exige firma
+la app exige firma ->  no registramos el par
+no registramos el par ->  no hay isVerifiedNickname
+```
+
+Y `handleBroadcastMessage` exige lo último:
+
+```kotlin
+if (peerInfo == null || !peerInfo.isVerifiedNickname) {
+    Log.w(TAG, "Dropping public message from unverified peer ${peerID.take(8)}")
+    return
+}
+```
+
+Por eso el `MESSAGE` de »3.10 se perdió: no porque el texto plano esté mal,
+sino porque nunca hubo par verificado.
+
+### Lo que se firma, y lo que no
+
+**No es lo mismo.** Se firma `to_binary_data_for_signing()`:
+
+```
+preimagen  : 01 01 00 00 00 01 a1 0c ...   TTL a 0, sin firma, sin relleno
+to_bytes() : 01 01 07 00 00 01 a1 0c ...   TTL real
+```
+
+Firmar el segundo produce una firma que **no valida** contra el primero. Pasó en
+el primer test de `test_announce_firmado.py`, y por eso ahora hay un test que
+comprueba que no son lo mismo.
+
+### Lo implementado
+
+- `Identity.announce_packet(..., firmar=False)`. **Apagado por defecto**: hasta
+  el 06-oct todos los announces se mandaron sin firmar, y un flag explicito hace
+  visible el cambio en vez de alterar el comportamiento en silencio.
+- Firmado: 175 B rellenos a 256, `HAS_SIGNATURE`, 64 B de firma, y la firma
+  verifica contra la preimagen.
+- `smoke_ble.py --firmar`, y dice en pantalla qué pasa y por qué importa.
+- **El handshake no se firma**, porque la app tampoco
+  (`MessageHandler.kt:392`). Hay un test que lo comprueba.
+
+### Lo que queda sin confirmar
+
+Que la preimagen de la app sea **exactamente** la nuestra. `probe_announce.py` lo
+verifica con los bytes reales y dice `>>> VALIDA` o `>>> NO VALIDA`. Con lo que
+sabemos, debería ser lo primero: `BinaryProtocol.kt:116-131` y §3.2bis.
+
+---
+
 ## 4. Cómo arrancar
 
 ### En el host Linux (donde está el Bluetooth)

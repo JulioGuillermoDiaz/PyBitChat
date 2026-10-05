@@ -309,8 +309,16 @@ def _preparar(args, identidad, mac):
         if args.noise_public:
             print(f"  Noise remota     = {args.noise_public.hex()}")
     else:
-        paquete = identidad.announce_packet(ttl=3)
-        print(f"\nenviando ANNOUNCE de {args.nickname!r}")
+        firmar = getattr(args, "firmar", False)
+        paquete = identidad.announce_packet(ttl=3, firmar=firmar)
+        if firmar:
+            print(f"\nenviando ANNOUNCE de {args.nickname!r} **FIRMADO**")
+            print("  Sin firma la app lo descarta: `AnnouncementIdentityValidator")
+            print("  .verify` devuelve null y no nos registra como par. Ver")
+            print("  `MessageHandler.handleAnnounceWithResult`.")
+        else:
+            print(f"\nenviando ANNOUNCE de {args.nickname!r} sin firma")
+            print("  (con --firmar lo acepta la app; ver ESTADO.md)")
 
     print(f"  peer_id = {identidad.peer_id_hex}  (sha256 de la clave Noise, [:8])")
     print(f"  clave Noise = {identidad.noise_public.hex()}")
@@ -821,6 +829,9 @@ def main() -> int:
     p.add_argument("--guardar", type=Path,
                    default=RAIZ / "capturas" / "recibido.bin",
                    help="fichero donde se guardan los paquetes recibidos")
+    p.add_argument("--firmar", action="store_true",
+                   help="firma el announce con Ed25519. **Sin esto la app lo "
+                        "descarta**: sin firma no nos registra como par verificado")
     p.add_argument("--msg3", action="store_true",
                    help="envía el `msg3` (64 B) si la lectura del `msg2` dio "
                         "IGUAL. Implica --handshake")
