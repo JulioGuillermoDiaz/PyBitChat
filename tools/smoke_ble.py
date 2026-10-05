@@ -274,7 +274,83 @@ async def principal(args: argparse.Namespace) -> int:
         raise SystemExit(2)
 
 
-def _preparar(args, identidad, mac):
+async def _esperar_anuncio_app(recibidos, segundos: float):
+    """Espera el announce de la app y devuelve `(peer_id, noise_public)`.
+
+    Devuelve `None` si no llega en el plazo.
+
+    ## Por qué hay que esperarlo
+
+    El `msg1` va dirigido a `recipient_id`, y
+    `MessageHandler.handleNoiseHandshake` lo compara con **su** `myPeerID`:
+
+    ```kotlin
+    val recipientID = packet.recipientID?.toHexString()
+    if (recipientID != myPeerID) { return }
+    ```
+
+    Si no cuadra, el paquete se descarta sin `msg2`, sin excepción y sin nada en
+    la traza. Es el mismo modo de fallo que un characteristic ausente, y por eso
+    no se puede distinguir desde fuera.
+
+    ## De dónde sale el `peer_id` sin que se lo pidamos
+
+    Del propio announce de la app, que llega **firmado** y con la clave Noise en
+    claro (TLV 0x02). Y como el `peer_id` es `sha256(esa clave)[:8]`
+    (`NoisePeerIdentity.derivePeerID`), se puede **comprobar**:
+
+        sender_id == sha256(clave del announce)[:8]
+
+    Esa comprobación es lo que lo hace fiable. Sin ella, `sender_id` sería un
+    dato que el otro afirma sobre sí mismo, y con BLE eso es la definición de
+    no saber nada. Es la misma condición que
+    `AnnouncementIdentityValidator` impone al revés, así que si pasa, el paquete
+    es de alguien que sabe quién es.
+
+    ## Por qué no basta con `--peer-id`
+
+    `--peer-id` sigue funcionando y manda sobre esto. Pero **no debería hacer
+    falta**, y su ausencia era una trampa real: el destino por defecto era
+    **nuestro propio `peer_id`**, así que sin acordarse del flag el `msg1` se
+    mandaba a uno mismo y la app lo tiraba callada. Pasó el 2026-10-06 y costó una
+    ejecución entera. Un aviso en pantalla no evita eso; no necesitar el flag sí.
+    """
+    from pybitchat.protocol.identity import IdentityAnnouncement, peer_id_from_noise_key
+
+    limite = time.monotonic() + segundos
+    while True:
+        for datos in list(recibidos):
+            try:
+                p = Packet.from_bytes(datos)
+            except Exception:
+                continue
+            if p.header.raw_type != 0x01:  # MessageType.ANNOUNCE
+                continue
+            try:
+                carga = decode_payload(p.header.raw_type, p.payload, CURRENT)
+            except Exception:
+                continue
+            if not isinstance(carga, IdentityAnnouncement):
+                continue
+
+            derivado = peer_id_from_noise_key(carga.noise_public_key)
+            if derivado != p.sender_id:
+                # announced + firmados, pero el ID no encaja con la clave. No nos
+                # fiamos: de esto sale el destinatario del handshake.
+                print(f"    el announce declara {p.sender_id.hex()} pero su clave "
+                      f"da {derivado.hex()}; no se usa")
+                continue
+            return derivado, carga.noise_public_key
+        if time.monotonic() >= limite:
+            return None
+        await asyncio.sleep(0.25)
+
+
+class _FaltaPeerId(RuntimeError):
+    """El `msg1` necesita el `peer_id` de la app y no se pudo averiguar."""
+
+
+def _preparar(args, identidad, mac, peer_id_remoto=None):
     """Decide qué paquete enviar e imprime de dónde sale.
 
     Tres modos, y el handshake necesita el `peer_id` del móvil, que es **otro**
@@ -289,14 +365,17 @@ def _preparar(args, identidad, mac):
         paquete = args.paquete
         print(f"\nreenviando bytes de {args.paquete} sin interpretarlos")
     elif args.handshake:
-        # El `peer_id` de la app viene del announce, no de la MAC. Si el
-        # usuario lo pasa, se usa; si no, se deriva y se avisa.
-        peer_id = args.peer_id or identidad.peer_id
-        if args.peer_id is None:
-            print(
-                f"\nAVISO: sin --peer-id se usa el nuestro ({peer_id.hex()}).\n"
-                "  Si el móvil no lo tiene, descartará el paquete en silencio\n"
-                "  (MessageHandler.kt:375). Pásalo con --peer-id."
+        # El `peer_id` de la app **no** es el nuestro, y antes de aprenderlo del
+        # announce se usaba el nuestro por defecto. Eso mandaba el `msg1` a uno
+        # mismo y la app lo tiraba sin decir nada: ni `msg2`, ni error, ni
+        # traza. Pasó el 2026-10-06 y costó una ejecución entera, y el aviso que
+        # había en pantalla no lo evitó. Ahora `_sesion` lo aprende del announce
+        # firmado de la app y lo deja aquí antes de llegar.
+        peer_id = args.peer_id
+        if peer_id is None:
+            raise _FaltaPeerId(
+                "no hay peer_id de la app: ni --peer-id ni un announce suyo "
+                "que lo traiga. Sin eso el msg1 se descarta en silencio"
             )
         # La sesión **se devuelve** aunque ya no se use para responder. Devolverla
         # evita que un día alguien añada un segundo camino y reintroduzca el
@@ -708,15 +787,66 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
         return 1
     print("  notificaciones activadas")
 
-    paquete, sesion = _preparar(args, identidad, mac)
-
     limite = car.max_write_without_response_size
-    if len(paquete) > limite:
-        print(f"\nERROR: excede el máximo escribible ({limite} B). "
-              f"MTU no negociado bien.")
+
+    async def escribir(paquete: bytes, que: str) -> bool:
+        if len(paquete) > limite:
+            print(f"\nERROR: {que} mide {len(paquete)} B y excede el máximo "
+                  f"escribible ({limite} B). MTU no negociado bien.")
+            return False
+        await cliente.write_gatt_char(car, paquete, response=False)
+        print("  enviado")
+        return True
+
+    # El announce va **antes** del handshake, y ya no son excluyentes.
+    #
+    # Antes eran un `if/elif/else`, así que con `--handshake` no se mandaba
+    # ninguno. Y eso ya no da igual: la app nos borra a los 3 minutos sin
+    # announcements (`STALE_PEER_TIMEOUT_MS = 180_000`), mientras que el
+    # handshake necesita que nos siga teniendo como par verificado. Entre dos
+    # ejecuciones se nos caía el pulso, y con él el TLV 0x04 de nuestro `peer_id`
+    # que la app gossipea. Se vio: 90 B de payload con nuestro ID dentro, luego
+    # 80 B sin él.
+    if args.firmar and args.handshake and not args.paquete:
+        print("\n= announces y handshake en la misma conexión =")
+        print("  El announce va primero: la app nos da de baja a los 3 min sin él")
+        print("  (STALE_PEER_TIMEOUT_MS), y el handshake necesita que nos tenga")
+        print("  como par verificado.")
+        paquete = identidad.announce_packet(ttl=MESSAGE_TTL_HOPS, firmar=True)
+        print(f"\nenviando ANNOUNCE de {args.nickname!r} **FIRMADO**")
+        print(f"  tamaño = {len(paquete)} B  (TTL {MESSAGE_TTL_HOPS}, "
+              f"que es lo que exige DirectLinkAnnouncementPolicy)")
+        print(hexdump(paquete))
+        if not await escribir(paquete, "el announce"):
+            return 1
+
+    if args.handshake and args.peer_id is None:
+        print(f"\n= aprendiendo el peer_id de la app =")
+        print("  Su announce va firmado, y su peer_id es sha256(clave)[:8], así")
+        print("  que se comprueba en vez de creerse. La app anuncia al conectar.")
+        plazo = args.segundos
+        hallado = await _esperar_anuncio_app(recibidos, plazo)
+        if hallado is None:
+            print(f"  NO llegó ningún announce suyo en {plazo} s.")
+            print("  Pásalo entonces a mano:  --peer-id <16 hex>")
+            print("  Sin eso el msg1 se descarta en silencio, sin msg2 y sin")
+            print("  error (MessageHandler.handleNoiseHandshake).")
+            return 1
+        args.peer_id, args.noise_public = hallado
+        args.peer_id_hex = args.peer_id.hex()
+        print(f"  peer_id de la app = {args.peer_id_hex}")
+        print(f"  clave Noise       = {args.noise_public.hex()}")
+        print("  y el announce declara ese mismo ID, así que va firmado por")
+        print("  alguien que sabe su propia clave.")
+
+    try:
+        paquete, sesion = _preparar(args, identidad, mac)
+    except _FaltaPeerId as exc:
+        print(f"\nERROR: {exc}")
         return 1
-    await cliente.write_gatt_char(car, paquete, response=False)
-    print("  enviado")
+
+    if not await escribir(paquete, "el paquete"):
+        return 1
 
     if args.handshake:
         return await _escuchar_handshake(
@@ -840,10 +970,13 @@ def main() -> int:
                    help="envía el `msg3` (64 B) si la lectura del `msg2` dio "
                         "IGUAL. Implica --handshake")
     p.add_argument("--handshake", action="store_true",
-                   help="enviar NOISE_HANDSHAKE (msg1) en vez de ANNOUNCE")
+                   help="enviar NOISE_HANDSHAKE (msg1) ademas del announce, "
+                        "que se manda primero")
     p.add_argument("--peer-id", type=lambda s: _hex(s, 8), default=None,
                    help="peer_id de 8 bytes de la app, en hex. Va en "
-                        "recipient_id; sin él la app descarta el paquete")
+                        "recipient_id. **No hace falta**: si falta, se aprende "
+                        "del announce firmado que manda la app al conectar, y "
+                        "se comprueba contra su clave Noise")
     p.add_argument("--noise-public", type=lambda s: _hex(s, 32),
                    default=None,
                    help="clave Noise pública de 32 bytes de la app, en hex "

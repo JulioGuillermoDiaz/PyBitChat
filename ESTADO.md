@@ -653,6 +653,63 @@ nuestro `ttl=3`.
 Si con TTL 7 ya aparecemos. Es lo único que queda del announce, y depende de
 una sola ejecución real.
 
+### 3.15 El `msg1` se mandaba a uno mismo
+
+**Resuelto el 2026-10-06.** Con el announce ya firme, quedaba el `msg3` y el
+`0x11`. El `msg1` se construyó con `--peer-id` sin pasar, y el valor por defecto
+era el nuestro:
+
+```
+destinatario     = 09dce4fe2058f5db   <-- el nuestro
+```
+
+`MessageHandler.handleNoiseHandshake` compara el `recipient_id` con su
+`myPeerID` y hace `return`. Sin `msg2`, sin excepción, sin traza. Costó una
+ejecución entera en un fallo cuya causa estaba escrita en la salida, y el aviso
+que ya había ahí ("pásalo con --peer-id") no lo evitó: los avisos
+dejan la decisión al que lee, y este no es opcional.
+
+### El announce y el handshake eran excluyentes
+
+`if/elif/else` en `_preparar`: con `--handshake` no se mandaba announce. Y ya no
+daba igual, por lo de §3.14: la app nos borra a los 3 minutos sin announcements
+(`STALE_PEER_TIMEOUT_MS = 180_000`) y el handshake necesita que nos siga
+teniendo como par verificado. El pulso se caía entre ejecuciones, y se ve:
+el announce de la app pasó de 90 B (con nuestro `peer_id` en el TLV 0x04) a
+80 B sin él.
+
+### Lo que no hace falta: acordarse del flag
+
+La app **anuncia su propia identidad**, firmada, con la clave Noise en claro
+(TLV 0x02). Y como el `peer_id` es `sha256(clave)[:8]`
+(`NoisePeerIdentity.derivePeerID`), sale de ahí y **se comprueba**:
+
+    sender_id == sha256(clave del announce)[:8]
+
+Sin esa comprobación el `sender_id` sería un dato que el otro afirma sobre
+sí mismo, y con BLE eso no es una identidad. Es la misma condición que
+`AnnouncementIdentityValidator` impone al revés.
+
+### Lo implementado
+
+- `_esperar_anuncio_app()` espera el announce de la app y devuelve
+  `(peer_id, noise_public)`, rechazando los que no cuadran. Se asigna a
+  `args.peer_id`, que es lo que ya leían `_preparar` y `_enviar_msg3`: por eso
+  `--peer-id` sigue mandando sin casos especiales, y por eso el cambio son 12
+  líneas en vez de un parámetro nuevo por tres funciones.
+- `_FaltaPeerId`: sin destino, error en vez de un envío inútil.
+- El announce **va antes** del handshake cuando se piden los dos, y ya no son
+  excluyentes.
+- `tests/test_esperar_anuncio.py`, 13 tests, incluido el caso de seguridad: un
+  `sender_id` que no cuadra con su clave no puede ser destino.
+
+### De paso: un discriminador mejor
+
+El TLV 0x04 del announce de la app es un **pulso con caducidad de 3 minutos**:
+lleva nuestro `peer_id` si y solo si nos tiene como par verificado *y* con
+conexión directa ahora mismo. Se ve en la traza, sin tocar el móvil y sin
+mirar ninguna lista, y distingue lo que antes solo se podía ver preguntando.
+
 ---
 
 ## 4. Cómo arrancar

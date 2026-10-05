@@ -586,20 +586,98 @@ class TestSmokeBle(unittest.TestCase):
         self.assertEqual(p.recipient_id, PEER_APP)
         self.assertEqual(len(p.payload), MSG1_SIZE)
 
-    def test_sin_peer_id_avisa_que_el_destinatario_puede_fallar(self):
-        """Sin `--peer-id` se usa el nuestro, que la app no tiene. El mensaje
-        tiene que decirlo: en otro caso el silencio de la app no se explica."""
+    def test_sin_peer_id_rechaza_en_vez_de_mandarse_a_si_mismo(self):
+        """Sin `peer_id` de la app, error. Nunca usar el nuestro como destino.
+
+        ## Lo que pasó
+
+        Antes el destino por defecto era `identidad.peer_id`, con un aviso en
+        pantalla. El aviso no servía de nada: la ejecución del 2026-10-06 mandó
+        el `msg1` a uno mismo, la app lo descartó sin decir nada y no hubo `msg2`
+        que interpretar. Se gastó una ejecución entera en un fallo cuya causa
+        estaba escrita en la salida.
+
+        ## Por qué ahora es un error y no un aviso
+
+        Un aviso deja la decisión al que lee, y este es el sitio donde el
+        destinatario **no** es opcional:
+        `MessageHandler.handleNoiseHandshake` compara el `recipient_id` con su
+        propio `myPeerID` y hace `return`. No hay forma de que salga bien, así que
+        no se manda.
+
+        Y el `peer_id` ya no hay que acertarlo: `_sesion` lo aprende del announce
+        firmado de la app antes de llegar aquí.
+        """
         import io
         from contextlib import redirect_stdout
 
         buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(self.smoke._FaltaPeerId):
+            self.smoke._preparar(self._args(handshake=True), self.ident, "X")
+
+    def test_el_error_dice_que_pasa_y_como_se_resuelve(self):
+        """El mensaje tiene que señalar la causa y el remedio.
+
+        Es lo mínimo que hace un `RuntimeError` sobre un `ValueError` genérico:
+        el texto es la documentación de un fallo que no tiene traceback útil.
+        """
+        args = self._args(handshake=True)
+        args.peer_id = None
+        with self.assertRaises(self.smoke._FaltaPeerId) as ctx:
+            self.smoke._preparar(args, self.ident, "X")
+        texto = str(ctx.exception)
+        self.assertIn("peer_id", texto)
+        self.assertIn("announce", texto)
+        self.assertIn("silencio", texto)
+
+    def test_el_destinatario_aprendido_se_usa(self):
+        """El `peer_id` que aprende `_sesion` es el que acaba en el paquete."""
+        import io
+        from contextlib import redirect_stdout
+
+        args = self._args(handshake=True)
+        args.peer_id = PEER_APP
+        buf = io.StringIO()
         with redirect_stdout(buf):
-            self.smoke._preparar(
-                self._args(handshake=True), self.ident, "X"
-            )
-        salida = buf.getvalue()
-        self.assertIn("AVISO", salida)
-        self.assertIn("MessageHandler.kt:375", salida)
+            paquete, sesion = self.smoke._preparar(args, self.ident, "X")
+        self.assertIsNotNone(sesion)
+        self.assertEqual(Packet.from_bytes(paquete).recipient_id, PEER_APP)
+
+    def test_ningun_camino_deja_el_destinatario_igual_al_nuestro(self):
+        """Nuestro `peer_id` no puede aparecer como `recipient_id` del `msg1`.
+
+        Es la invariante del bug, comprobada sobre el código: si algún día
+        vuelve un `args.peer_id or identidad.peer_id`, esto salta.
+        """
+        import inspect
+
+        fuente = inspect.getsource(self.smoke._preparar)
+        self.assertNotIn("or identidad.peer_id", fuente)
+        self.assertIn("raise _FaltaPeerId", fuente)
+
+    def test_el_announce_va_antes_del_handshake(self):
+        """Con los dos flags, el announce sale primero.
+
+        ## Por qué el orden importa ahora
+
+        La app nos borra a los 3 minutos sin announcements
+        (`STALE_PEER_TIMEOUT_MS = 180_000`), y el handshake necesita que nos siga
+        teniendo como par verificado. Con el `if/elif/else` de antes, `--handshake`
+        **no mandaba announce**, así que el pulso se caía entre ejecuciones. Se
+        veía en la traza: el announce de la app pasaba de 90 B (con nuestro
+        `peer_id` en el TLV 0x04) a 80 B sin él.
+        """
+        import inspect
+
+        fuente = inspect.getsource(self.smoke._sesion)
+        i_announce = fuente.index("announce_packet(")
+        i_handshake = fuente.index("_preparar(")
+        self.assertLess(
+            i_announce, i_handshake,
+            "el announce tiene que escribirse antes de preparar el handshake",
+        )
+        # Y la condición que lo activa: los dos flags a la vez.
+        self.assertIn("args.firmar and args.handshake", fuente)
 
     def test_con_handshake_devuelve_la_sesion(self):
         """Sin sesión no hay quien procese el `msg2`.
