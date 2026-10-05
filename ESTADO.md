@@ -322,20 +322,29 @@ sesión siguiente lo refutó: **`m` bajó de 896 a 256**.
 | 05-oct 3ª | 21 B | 7 | 768 | 8 B | no |
 | 05-oct 4ª | 21 B | 7 | 768 | 8 B | **sí** |
 | 05-oct 5ª | 22 B | 7 | **896** | 8 B | **sí** |
-| 05-oct 6ª | **16 B** | 7 | **256** | **2 B** | **sí** |
+| 05-oct 6ª | 16 B | 7 | 256 | 2 B | **sí** |
+| 06-oct 1ª | 15 B | 7 | **128** | **1 B** | **sí** |
 
 Lo que sí se sostiene:
 
 - `p` = 7 en las once, sin moverse.
-- **Todos los `m` son múltiplos de 128**: 2x, 3x, 4x, 6x, 7x. Once puntos, y con
-  384 y 896 ya no hay forma de que sea casualidad. Es un número de **bytes**,
-  no de paquetes — por eso no es múltiplo de 256.
+- **Todos los `m` son múltiplos de 128**, y ahora con los dos extremos: **128**
+  y **896**. Doce puntos. Es un número de **bytes** pedidos, no de paquetes —
+  por eso no es múltiplo de 256.
 - **`m` no es monotónico**: subió hasta 896 y volvió a 256. Y `data` bajó de
   8 a 2 B. Así que **no** es un contador acumulado. Lo que lo fija sigue sin
   mirar, y no se sabe qué reinicia.
 
 El formato sí está claro: TLV con tipo de 1 B y longitud de 2 B en big-endian.
-`p` es el TLV `0x01`, `m` el `0x02`, y `data` el `0x03`. Comprobado con el payload
+`p` es el TLV `0x01`, `m` el `0x02`, y `data` el `0x03`. Verificado en el código:
+`tlv.py` valida que `M` mida 4 bytes y lo lee con `struct.unpack(">I")`.
+
+> ⚠️ **El `m` de la sesión del 06-oct se leyó mal a mano.** Leyendo el
+> volcado del terminal parecía 384; el valor real es **128**, y el parser tenía
+> razón. Me había comido un `0` del hex. Es exactamente el fallo de §7
+> —no calcular sobre bytes transcritos a mano— y por eso la comprobación
+> fue al código y no al volcado. Cuando las dos fuentes discrepan, **el código
+> gana**: es lo único que no depende de mis ojos. Comprobado con el payload
 de la 6ª sesión, `01 0001 07 020004 00000100 030002 7a1c`: `p`=7, `m`=256, y
 `data` de 2 B.
 
