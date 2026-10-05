@@ -587,6 +587,72 @@ ninguna vale lo dice así, en vez de dejar la conclusión abierta.
     preimagen  01 01 00 | ... | 00 | 00 59 | ...   TTL 0, sin HAS_SIGNATURE
     cable      01 01 03 | ... | 02 | 00 59 | ...   TTL 3, con HAS_SIGNATURE
 
+### 3.14 El TTL del announce: la app no nos contaba en el mesh
+
+**Resuelto el 2026-10-06.** Con la firma ya correcta (§3.13) y las cinco
+condiciones de `AnnouncementIdentityValidator` cumplidas, el móvil seguía sin
+contarnos: `mesh [0 personas]`.
+
+El bug no estaba en el validador. Estaba **después**, en una sola línea:
+
+```kotlin
+// DirectLinkAnnouncementPolicy.observationFor
+fun observationFor(routed: RoutedPacket, maxTtl: UByte): Observation? {
+    if (routed.packet.ttl != maxTtl) return null
+```
+
+`maxTtl` es `AppConstants.MESSAGE_TTL_HOPS` = **7**. Nuestro announce iba con
+**3**, un valor por defecto inventado en `identity.py` (y repetido en
+`smoke_ble.py`). Lo que se cae con ese `null`:
+
+```
+ttl != 7
+  -> observationFor() = null
+  -> observePeerIfCurrent() nunca se llama
+  -> addressPeerMap vacía
+  -> isPeerDirectlyConnected = false
+  -> no aparecemos, y no llega scheduleInitialSyncToPeer()
+```
+
+Y `isPeerDirectlyConnected` **solo** mira ese mapa:
+
+```kotlin
+peerManager.isPeerDirectlyConnected = { peerID ->
+    connectionManager.addressPeerMap.containsValue(peerID)
+}
+```
+
+### Por qué nadie lo vió antes
+
+El TTL es la señal de "me llegó sin reenviar", y 3 dice "me reenviaron dos
+veces". Un announce con TTL bajo **no se rechaza**: es válido, se acepta, el par
+se registra. Lo que no ocurre es la observación de alcance. Es una ausencia, no
+un error, y por eso seaccumula con todo lo demás que estaba bien: la firma, el
+relleno de la preimagen, el reloj, el TLV, el `peerID` derivado.
+
+Todos los announces de la app salen con `ttl = maxTtl`
+(`MeshCore.sendBroadcastAnnounce`), y los que nos mandaba en las capturas
+también. Lo comprobamos en la traza: los paquetes de la app tenían `ttl=7` y el
+nuestro `ttl=3`.
+
+### Lo implementado
+
+- `MESSAGE_TTL_HOPS = 7` en `packet.py`, con la procedencia escrita al lado.
+- `announce_packet(ttl=MESSAGE_TTL_HOPS)` por defecto, y `smoke_ble.py` usa la
+  constante. Los dos sitos que tenían un 3 hardcodeado.
+- `tests/test_ttl_anounce.py`: 11 tests. El central **implementa la regla de la
+  app** y la corre sobre nuestro announce real, en vez de comprobar "que el TTL
+  valga 7". Antes de arreglarlo daba `None`. Tres tests más impiden que el
+  literal vuelva.
+
+    firmar=False  111 B  ttl=7  flags=0x00
+    firmar=True   256 B  ttl=7  flags=0x02
+
+### Lo que sigue sin probarse
+
+Si con TTL 7 ya aparecemos. Es lo único que queda del announce, y depende de
+una sola ejecución real.
+
 ---
 
 ## 4. Cómo arrancar

@@ -69,7 +69,13 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from ..noise.primitives import DH_LEN, generate_x25519_private, x25519_public_from_private
-from .packet import Packet, PacketHeader, ProtocolError, pkcs7_pad_to_bucket
+from .packet import (
+    MESSAGE_TTL_HOPS,
+    Packet,
+    PacketHeader,
+    ProtocolError,
+    pkcs7_pad_to_bucket,
+)
 from .types import PEER_ID_SIZE, PacketFlags
 
 #: Longitud de cada clave. Ambas son de 32 bytes.
@@ -354,7 +360,7 @@ class Identity:
     def announce_packet(
         self,
         *,
-        ttl: int = 3,
+        ttl: int = MESSAGE_TTL_HOPS,
         timestamp: int | None = None,
         firmar: bool = False,
     ) -> bytes:
@@ -363,6 +369,25 @@ class Identity:
         El `sender_id` sale de la clave, así que el paquete es coherente consigo
         mismo: quien lo reciba puede comprobar que el identificador corresponde a la
         clave que announcea.
+
+        ## `ttl`: por qué 7 y no 3
+
+        **Este valor decidía si aparecíamos en la lista de la app.** Con TTL 3 el
+        announce se aceptaba y el par se registraba, pero como par *no directo*:
+
+        ```kotlin
+        // DirectLinkAnnouncementPolicy.observationFor
+        if (routed.packet.ttl != maxTtl) return null   // maxTtl = 7
+        ```
+
+        Ese `null` se come la anotación en `addressPeerMap`, que es lo único que
+        hace vrai `isPeerDirectlyConnected`, y también el
+        `scheduleInitialSyncToPeer`. El TTL es la señal de "me llegó sin
+        reenviar"; un 3 dice "me reenviaron dos veces".
+
+        Todos los announces de la app salen con 7 (`sendBroadcastAnnounce` usa
+        `ttl = maxTtl`), y los que nos mandaba en las capturas también. El 3
+        venía de un valor por defecto inventado en este fichero.
 
         ## `firmar`: por qué está apagado, y por qué hay que encenderlo
 

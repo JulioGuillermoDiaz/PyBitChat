@@ -37,7 +37,11 @@ from pybitchat.ble.gatt import (  # noqa: E402
     es_nuestro_servicio,
 )
 from pybitchat.protocol.identity import Identity  # noqa: E402
-from pybitchat.protocol.packet import Packet, PacketHeader  # noqa: E402
+from pybitchat.protocol.packet import (  # noqa: E402
+    MESSAGE_TTL_HOPS,
+    Packet,
+    PacketHeader,
+)
 from pybitchat.protocol.payloads import decode_payload, CURRENT  # noqa: E402
 from pybitchat.protocol.types import MessageType, PacketFlags  # noqa: E402
 
@@ -63,7 +67,7 @@ def hexdump(datos: bytes, sangria: str = "    ") -> str:
     return "\n".join(lineas)
 
 
-def construir_announce(nickname: str, ttl: int = 3) -> bytes:
+def construir_announce(nickname: str, ttl: int = MESSAGE_TTL_HOPS) -> bytes:
     """Monta un paquete ANNOUNCE con nuestro códec.
 
     Deprecation en favor de `Identity.announce_packet()`: este construía un
@@ -310,7 +314,7 @@ def _preparar(args, identidad, mac):
             print(f"  Noise remota     = {args.noise_public.hex()}")
     else:
         firmar = getattr(args, "firmar", False)
-        paquete = identidad.announce_packet(ttl=3, firmar=firmar)
+        paquete = identidad.announce_packet(ttl=MESSAGE_TTL_HOPS, firmar=firmar)
         if firmar:
             print(f"\nenviando ANNOUNCE de {args.nickname!r} **FIRMADO**")
             print("  Sin firma la app lo descarta: `AnnouncementIdentityValidator")

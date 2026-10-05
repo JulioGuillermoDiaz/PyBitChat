@@ -92,6 +92,23 @@ PROTOCOL_VERSION = 0x01
 #: `SYNC_TTL_HOPS` en `BitchatPacket.toBinaryDataForSigning`.
 SYNC_TTL_HOPS = 0
 
+#: TTL con el que salen los announces y los mensajes. `AppConstants.MESSAGE_TTL_HOPS`.
+#:
+#: **No es un detalle de estilo: es lo que nos hace existir en la lista de la
+#: app.** `DirectLinkAnnouncementPolicy.observationFor` empieza así:
+#:
+#: ```kotlin
+#: if (routed.packet.ttl != maxTtl) return null
+#: ```
+#:
+#: Ese `maxTtl` es 7, y el `null` se come tres cosas a la vez: la anotación en
+#: `addressPeerMap`, el flag `isPeerDirectlyConnected`, y el
+#: `scheduleInitialSyncToPeer`. El TTL es la señal de "me llegó sin reenviar", así
+#: que un announce con TTL 3 dice "me reenviaron dos veces" y la observación
+#: entera se descarta. El announce se acepta y el par se registra, pero como
+#: par **no directo**, que es como no sale en la lista.
+MESSAGE_TTL_HOPS = 7
+
 
 class Reader:
     """Lector secuencial big-endian sobre un buffer de bytes."""
