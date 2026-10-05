@@ -90,6 +90,10 @@ def construir_announce(nickname: str, ttl: int = 3) -> bytes:
 #: con signo de 8 bits, y el valor "sin dato" del protocolo.
 RSSI_SIN_DATO = -127
 
+#: MTU por defecto de BlueZ. Es el valor que se queda si `_acquire_mtu()` falla,
+#: y en ese caso un paquete de 256 B no cabe. Ver la nota de `_sesion`.
+MTU_POR_DEFECTO = 23
+
 
 def contar_uuids(anuncios: dict) -> int:
     """Suma los UUID de servicio de todos los dispositivos vistos.
@@ -596,6 +600,55 @@ def _primero_inesperado(datos):
         return None
 
 
+def _sin_characteristic(cliente) -> int:
+    """El telófano anunció BitChat pero no sirvió el characteristic. Ver §3.
+
+    ## Por qué esto necesita su propio camino
+
+    El anuncio y el GATT son cosas distintas. Que el `UUID` de servicio aparezca
+    en el scanning **no** garantiza que el servidor GATT exponga el
+    characteristic en esa conexión: la app puede estar en un estado en el que
+    publica el anuncio y todavía no levanta el servicio, o la MAC rotada
+    apuntó a un estado anterior.
+
+    Y sin characteristic no hay nada que hacer: no hay por dónde escribir ni por
+    dónde escuchar. Sale con código 1 y un motivo, no con un traceback.
+
+    ## Lo que se mira antes de culpar al código
+
+    | Síntoma | Causa probable |
+    |---|---|
+| 1 solo candidato, y menos `UUID` que de costumbre | el móvil announce |
+    | MTU 23 | `_acquire_mtu` falló; BlueZ se queda en su valor por defecto |
+| varios candidatos, MTU 517, y sin characteristic | el GATT de la app |
+
+    Los tres son del entorno. Este caso se registró como **"el teléfono no
+    sirvió el characteristic"**, que es lo que se sabe, y no como un fallo
+    nuestro.
+    """
+    print("\n  el teléfono anuncia BitChat pero no sirvió el characteristic.")
+    print(f"    characteristic buscado: {CHARACTERISTIC_UUID}")
+    servicios = getattr(cliente, "services", None)
+    if servicios is not None:
+        try:
+            print(f"    servicios descubiertos: {len(servicios)}")
+            for s in servicios:
+                print(f"      {s.uuid}  ({s.description})")
+        except Exception as exc:
+            print(f"    (no se pudieron listar: {type(exc).__name__}: {exc})")
+    print()
+    print("  El anuncio y el GATT son cosas distintas: que el UUID aparezca en")
+    print("  el escaneo no garantiza que el servicio se sirva en esta conexión.")
+    print()
+    print("  Antes de culpar al código, comprueba:")
+    print("   - si salían varios candidatos y la MTU es 517. Con un solo")
+    print("     candidato, o con MTU 23, el problema es el móvil")
+    print("   - si el móvil lleva más de 15 min sin actividad: ciérralo y")
+    print("     vuelve a abrir BitChat")
+    print("   - si BitChat está en primer plano y el teléfono desbloqueado")
+    return 1
+
+
 async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
     try:
         await cliente._backend._acquire_mtu()
@@ -603,13 +656,38 @@ async def _sesion(cliente, args, identidad, recibidos, al_recibir, mac) -> int:
         print(f"  _acquire_mtu falló: {exc}")
     print(f"  conectado. MTU = {cliente.mtu_size}")
 
-    await cliente.start_notify(CHARACTERISTIC_UUID, al_recibir)
-    print("  notificaciones activadas")
+    # MTU 23 es el valor por defecto de BlueZ, no el negociado. Se avisa porque
+    # un paquete de 256 B no cabe, y el envio grande falla **en silencio**: no
+    # hay excepción, simplemente no llega. Es el mismo modo de fallo que el
+    # characteristic ausente — el código no puede distinguirlo — y por eso
+    # se dice aquí en vez de dejar que lo descubra el `max_write_without_response_size`
+    # mucho después y con menos contexto.
+    if cliente.mtu_size <= MTU_POR_DEFECTO:
+        print(f"  AVISO: MTU = {cliente.mtu_size}, que es el valor por defecto de "
+              f"BlueZ.")
+        print("    La negociación no se completó, y un paquete de 256 B no cabe.")
+        print("    Un envío que no cabe **no da error**: no llega y no se sabe")
+        print("    por qué. Suele venir con el characteristic ausente, así que")
+        print("    las dos cosas suelen ser el mismo síntoma de un lado.")
 
+    # El characteristic se resuelve **antes** de activar las notificaciones, y
+    # no después. `start_notify` lo busca por dentro y lanza
+    # `BleakCharacteristicNotFoundError` si no lo encuentra, así que un `if
+    # car is None` colocado después es código muerto: nunca se alcanza.
+    #
+    # Pasó el 2026-10-05 con un traceback en vez de un diagnóstico, porque el
+    # teléfono se anunció pero no sirvió el characteristic en esa conexión.
     car = cliente.services.get_characteristic(CHARACTERISTIC_UUID)
     if car is None:
-        print("  el teléfono no expone el characteristic de BitChat")
+        return _sin_characteristic(cliente)
+
+    try:
+        await cliente.start_notify(car, al_recibir)
+    except Exception as exc:
+        print(f"  no se pudieron activar las notificaciones: "
+              f"{type(exc).__name__}: {exc}")
         return 1
+    print("  notificaciones activadas")
 
     paquete, sesion = _preparar(args, identidad, mac)
 
