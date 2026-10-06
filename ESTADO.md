@@ -960,6 +960,141 @@ nada del USB**. Son interfaces físicas distintas en el móvil: la radio va por
 el aire, el USB por los pines del conector. Un cable de carga lleva corriente y
 ni un dato, y la radio sigue funcionando igual.
 
+### 3.19 El AVRCP del móvil suspende su propio anuncio BLE
+
+**2026-10-06.** El móvil desaparecía del escaneo sin explicación, y el síntoma
+era el mismo que cuando no anunciaba: cero candidatos. Dos sesiones perdidas.
+
+## Lo que había pasado por delante
+
+`bluetoothctl devices Connected` listaba **un solo** dispositivo, el `Redmi 13C`.
+Y en el `dmesg` apareció tres veces, a lo largo de casi cinco horas:
+
+```
+input: Redmi 13C (AVRCP) as /devices/virtual/input/input36
+input: Redmi 13C (AVRCP) as /devices/virtual/input/input37
+input: Redmi 13C (AVRCP) as /devices/virtual/input/input42
+```
+
+**AVRCP** es el perfil de control remoto de áudio: una conexión Bluetooth **clásica**,
+no BLE. El portátil la tenía activa con el móvil.
+
+## Por qué eso hace que el móvil no anuncie
+
+Con una conexión clásica activa, Android en un Redmi **suspende el anuncio
+BLE**. Y desde fuera el resultado es el mismo que con el móvil apagado:
+
+```
+hay dispositivos pero ninguno anuncia BitChat
+```
+
+Cero candidatos. Un móvil que no anuncia y un móvil que está dormido
+**no se distinguen**, y por eso el script insiste con lo de las opciones de
+desarrollador y el primer plano, que no era el problema.
+
+## La prueba, y el antes/después
+
+```bash
+bluetoothctl disconnect 30:50:CE:3C:2D:95
+# [SIGNAL] BREDR.Disconnected - org.bluez.Reason.Remote
+# Connection terminated by remote user
+```
+
+Que lo termine el móvil es lo normal en un perfil de audio: ahí manda el
+teléfono. Después, **sin tocar nada más**:
+
+| | antes | después |
+|---|---|---|
+| candidatos con UUID de BitChat | **0** | **3** |
+| UUID de servicio vistos | 8 | **19** |
+
+Los tres con la marca `<-- BITCHAT` del `--crudo`, y el más fuerte a RSSI −54.
+
+## La lección, que es la parte útil
+
+**Antes de culpar al código, hay que mirar quién está conectado.** Una
+conexión Bluetooth clásica con la radio ocupada es invisible para un
+escáner
+BLE: no aparece en `bleak`, y el filtro UUID no tiene nada que evaluar porque no
+hay anuncios.
+
+Así que `bluetoothctl devices Connected` es una comprobación que cuesta un
+comando y **tenía ir antes** que `lsusb`, que es donde se acabó buscando.
+
+Y explica la sensación de que "el USB y el Bluetooth se pisan", que se le
+atribuyó a la antena. No se pisan: ya había **una** conexión Bluetooth
+ocupando la radio.
+
+## Lo que **no** era
+
+- El filtro de UUID: `es_nuestro_servicio` funcionaba, y lo demostró el
+  `--crudo` marcando el UUID principal.
+- El estado de la app: no era que BitChat estuviera dormido.
+- Las opciones de desarrollador: nunca fueron el problema.
+- El USB: el móvil no aparecía en `lsusb` con **dos cables y dos puertos**,
+  y en 17.112 s de `dmesg` no hubo ninguna enumeración USB del móvil. Sí es
+  físico: **los dos cables solo llevan corriente**, y Dolphin funciona por MTP
+  precisamente porque ese protocolo no necesita pines de datos USB enumerables.
+
+Lo del testnet (§3.20) fue un diagnóstico **mío y equivocado**, y está
+registrado como tal: el `--crudo` lo tumbó en una ejecución.
+
+### 3.20 El testnet: un diagnóstico mío equivocado
+
+**Registrado para que no se repita, 2026-10-06.** El móvil se capturaba con
+`bluetoothctl` y `smoke_ble` decía que no anunciaba BitChat. Dos mitades de la
+misma verdad sin nada en medio que las explicara, y propuse esto:
+
+```
+BITCHAT_SERVICE_UUID         = F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C
+BITCHAT_SERVICE_UUID_TESTNET = F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5A
+                                        ^ solo este carácter
+```
+
+Un APK de testnet anunciaría el que acaba en `A`, el filtro pedíaa el que
+acaba en `C`, y por eso el móvil era invisible. Escribí el código, dos
+commits y 14 tests sobre esa hipótesis.
+
+**Era falsa.** El primer `--crudo` de verdad lo desmintió en una ejecución:
+
+```
+53:48:49:26:71:FE   f47b5e2d-...-8e1d2c3a4b5c <-- BITCHAT
+```
+
+El **UUID principal**, el que el filtro ya aceptaba. La causa era §3.19: la
+conexión AVRCP.
+
+## Lo que quedó de la hipótesis
+
+Dos cosas, y las dos valen:
+
+**El filtro ahora acepta los dos UUID.** El testnet existe en `types.py` desde el
+principio, una build de prueba es un escenario real y aceptarla no cuesta nada.
+Lo que **no** se tocó es la guarda de falso positivo: un UUID que se parezca
+en dos posiciones se rechaza.
+
+**El `--crudo`, que es lo que evitó la segunda vuelta.** Es un volcado de
+dirección, nombre y UUID de todo lo que se ve, que marca el nuestro y **imprime
+los dos UUID buscados** para comparar en crudo. Cuando un filtro no encuentra
+nada, no hay manera de distinguir "falla el filtro" de "no hay anuncios": las dos
+cosas son cero candidatos. Ese flag las separa, y debería‚ existir desde el
+principio, no cuando ya se ha perdido una tarde.
+
+## La lección
+
+Un diagnóstico tiene que sostenerse con el primer dato real, no con una
+explicación que encaje bien. Esta encajaba **demasiado** bien: por eso la
+defendí y construí encima.
+
+La señal de alarma fue que el síntoma fuera **indistinguible** del caso
+trivial. "No aparece el móvil" dice exactamente lo mismo si no anuncia que si
+el filtro lo rechaza, y ahí es donde debería haber doubting el propio
+código antes que el entorno.
+
+Un test que fija el comportamiento con una frase como *"acepta el principal, y
+rechaza lo que solo se parece"* es justo el que habría dicho: *tambén el
+testnet, que es nuestro*.
+
 ---
 
 ## 4. Cómo arrancar
@@ -1143,10 +1278,47 @@ msg3 de 64 B, split() correcto     ✓   §3.16   (sale en ~1 s, no en 20)
 0x11 recibido                      ✗
 ```
 
+### Si vuelves: mira esto primero
+
+1. **`bluetoothctl devices Connected`**, antes de nada. Una conexión Bluetooth
+   clásica con el móvil lo hace desaparecer del escáner sin aviso. Es
+   §3.19 y costó dos sesiones.
+2. **Que el móvil tenga el cable nuevo.** Los dos anteriores solo llevaban
+   corriente; el kernel nunca lo vio en `lsusb`. Sin eso no hay `logcat`, y
+   §3.17 explica por qué el panel de debug no sirve para el `0x11`.
+3. **Identidad nueva** en cada ejecución (`--identity /tmp/nuevo.json`), que el
+   estado persistido de la app estorba.
+
 ### Lo siguiente: `NOISE_ENCRYPTED` (`0x11`)
 
 **Es el único paso que falta.** El handshake está cerrado de nuestro lado; lo que
 no está probado es que el de la app lo esté también.
+
+Con el cable funcionando, una ejecución lo dice:
+
+```bash
+./.venv/bin/python tools/probe_logcat.py -- \
+    --firmar --handshake --msg3 --identity /tmp/nuevo.json
+```
+
+Cuatro veredictos, y el segundo trae el motivo literal de la app. La cadena que
+lleva hasta él, por si hay que razonar sobre ella:
+
+```
+msg3 -> isEstablished() -> establishedNow = true
+      -> onKeyExchangeCompleted -> onSessionAuthenticated
+      -> ensureSession -> sendState          <-- el 0x11 sale aquí
+```
+
+Sin `msg3` no hay `establishedNow`, y sin eso no hay `sendState`. Pero el `msg3`
+**sí** se envía, con 64 B bien formados, y la lectura del `msg2` daba
+`IGUAL` en la clave y en el `peer_id`. Todo lo verificable daba bien, y el
+síntoma era la ausencia del `0x11`, que es indistinguible de "todavía no".
+
+Sin cable, la única vía que queda es el botón **"Start handshake"** de la
+pantalla de huella de una conversación privada: invierte los roles y la app
+inicia. Es código nuestro nuevo, porque `iniciar_handshake()` solo construye el
+`msg1`, y no se ha probado nunca.
 
 #### Cómo se entra al panel de debug
 
