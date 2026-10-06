@@ -43,7 +43,12 @@ from pybitchat.protocol.packet import (  # noqa: E402
     PacketHeader,
 )
 from pybitchat.protocol.payloads import decode_payload, CURRENT  # noqa: E402
-from pybitchat.protocol.types import MessageType, PacketFlags  # noqa: E402
+from pybitchat.protocol.types import (  # noqa: E402
+    BITCHAT_SERVICE_UUID,
+    BITCHAT_SERVICE_UUID_TESTNET,
+    MessageType,
+    PacketFlags,
+)
 
 #: `bleak` se importa **dentro** de las funciones, no aquí. Así `construir_announce`
 #: y `hexdump` se pueden probar sin el adaptador ni la dependencia, y la lógica de
@@ -129,8 +134,15 @@ def es_rssi_real(rssi) -> bool:
     return rssi is not None and rssi > RSSI_SIN_DATO
 
 
-async def resolver_telefono(timeout: float):
-    """Busca el teléfono por UUID de servicio, sin cachear direcciones."""
+async def resolver_telefono(timeout: float, *, crudo: bool = False):
+    """Busca el teléfono por UUID de servicio, sin cachear direcciones.
+
+    ## `crudo`: volcar los UUID de todo lo visto
+
+    Es para cuando el móvil se capta con `bluetoothctl` y aquí no aparece. Sin
+    ver los UUID crudos no se sabe si el fallo es del filtro o de que no
+    anuncia, y las dos cosas se ven igual desde aquí: cero candidatos.
+    """
     from bleak import BleakScanner
 
     print("buscando el teléfono…")
@@ -143,6 +155,33 @@ async def resolver_telefono(timeout: float):
         for mac, (dev, adv) in encontrados.items()
         if any(es_nuestro_servicio(u) for u in (adv.service_uuids or []))
     ]
+
+    # Volcado crudo de lo que se ha visto. Es el único modo de saber si el
+    # fallo está en el filtro o en que el móvil no anuncia: si el móvil se
+    # capta con `bluetoothctl` y aquí no aparece, sus UUID tienen que estar en
+    # alguna parte de esta lista, y leerlos dice cuál es.
+    #
+    # El caso que motiva esto: `es_nuestro_servicio` solo acepta el UUID
+    # principal, y hay un testnet que se diferencia **en el último
+    # carácter** (`...4B5A` frente a `...4B5C`). Una build de prueba
+    # anuncia ese, el filtro pide el otro, y el móvil estaría ahí
+    # anunciando a todo el mundo menos a nosotros.
+    if crudo:
+        print()
+        print(f"  {'direccion':19s} {'nombre':22s} UUID de servicio")
+        for mac, (dev, adv) in sorted(encontrados.items()):
+            nombre = getattr(adv, "local_name", None) or getattr(
+                dev, "name", None) or ""
+            uuids = ", ".join(str(u) for u in (adv.service_uuids or ())) or "-"
+            marca = " <-- BITCHAT" if any(
+                es_nuestro_servicio(u) for u in (adv.service_uuids or ())
+            ) else ""
+            print(f"  {mac:19s} {nombre[:22]:22s} {uuids}{marca}")
+        print()
+        print(f"  uuid principal buscado: {BITCHAT_SERVICE_UUID}")
+        print(f"  uuid testnet:           {BITCHAT_SERVICE_UUID_TESTNET}")
+        print("  Si hay un UUID que se parece y solo cambia al final, es el")
+        print("  testnet, y el filtro hay que ampliarlo.")
 
     if not candidatos:
         if not encontrados:
@@ -210,7 +249,9 @@ async def principal(args: argparse.Namespace) -> int:
           f"peer_id={identidad.peer_id_hex}")
     print(f"  (guardada en {identidad.guardar(args.identity)})")
 
-    hallado = await resolver_telefono(args.scan)
+    hallado = await resolver_telefono(
+        args.scan, crudo=getattr(args, "crudo", False)
+    )
     if hallado is None:
         print("\nNO aparece el teléfono.")
         print("¿Está desbloqueado con BitChat en primer plano?")
@@ -1007,6 +1048,11 @@ def main() -> int:
                    help="segundos de escucha (por defecto: 20)")
     p.add_argument("--scan", type=float, default=15.0,
                    help="segundos de escaneo (por defecto: 15)")
+    p.add_argument("--crudo", action="store_true",
+                   help="vuelca la direccion, el nombre y los UUID de servicio "
+                        "de TODO lo que se ve. Para cuando el movil se capta "
+                        "con bluetoothctl y aqui no aparece: sin los UUID "
+                        "crudos no se sabe si falla el filtro o no anuncia")
     p.add_argument("--timeout", type=float, default=25.0,
                    help="segundos de conexión (por defecto: 25)")
     p.add_argument("--guardar", type=Path,

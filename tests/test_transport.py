@@ -498,12 +498,52 @@ class TestComparacionDeUuid(unittest.TestCase):
         self.assertTrue(gatt.es_nuestro_servicio(gatt.SERVICE_UUID))
         self.assertTrue(gatt.es_nuestro_servicio(uuid.UUID(gatt.SERVICE_UUID.hex)))
 
-    def test_no_confunde_el_testnet(self):
-        """El testnet se parece mucho: mismo UUID salvo el último carácter."""
+    def test_reconoce_tambien_el_testnet(self):
+        """El de testnet **también** es nuestro, y se acepta.
+
+        ## Por qué cambió
+
+        Antes este test afirmaba lo contrario (`assertFalse`) y su nombre era
+        `test_no_confunde_el_testnet`. Venía del commit `74b7a79`, que arreglaba
+        otra cosa: comparar `SERVICE_UUID.hex` contra los UUID del anuncio, y
+        esa forma nunca puede coincidir. El testnet estaba ahí como **caso
+        difícil**, porque se parece mucho al principal —difiere en un único
+        carácter— y servía para comprobar que el filtro no aceptaba cualquier
+        cosa parecida.
+
+        ## Por qué ahora se acepta
+
+        Porque `SERVICE_UUID_TESTNET` estaba definido en `gatt.py` y **no lo
+        usaba nadie**. Una build de testnet anuncia `...4B5A`, el filtro pedía
+        `...4B5C`, y el móvil quedaba invisible para el escáner: cero
+        candidatos, indistinguible de "el móvil está apagado". Es lo que pasó el
+        2026-10-06.
+
+        ## Y la guarda que este test sigue siendo
+
+        Que se acepte **el testnet** no significa que se acepte lo que se
+        parezca. Eso lo comprueba `test_no_acepta_un_uuid_que_solo_se_parezca`.
+
+        Se distingue del caso original en que allí se usaba un UUID parecido
+        para probar el falso positivo; aquí se usa el que **de verdad anuncia la
+        app**.
+        """
         self.assertNotEqual(
             str(gatt.SERVICE_UUID_TESTNET), str(gatt.SERVICE_UUID)
         )
-        self.assertFalse(gatt.es_nuestro_servicio(str(gatt.SERVICE_UUID_TESTNET)))
+        self.assertTrue(gatt.es_nuestro_servicio(str(gatt.SERVICE_UUID_TESTNET)))
+
+    def test_no_acepta_un_uuid_que_solo_se_parezca(self):
+        """La guarda de falso positivo, que es lo que el test anterior probaba.
+
+        Un UUID que se parece al testnet en **dos** posiciones no es ninguno de
+        los dos. Sin esto, "acepta el testnet" se convierte en "acepta lo que
+        huela a BitChat".
+        """
+        parecido = str(gatt.SERVICE_UUID_TESTNET)[:-1] + "D"
+        self.assertNotEqual(parecido, str(gatt.SERVICE_UUID))
+        self.assertNotEqual(parecido, str(gatt.SERVICE_UUID_TESTNET))
+        self.assertFalse(gatt.es_nuestro_servicio(parecido))
 
     def test_basura_no_revienta(self):
         for basura in (None, "", "no-es-un-uuid", 42, b"\xff\xfe", []):

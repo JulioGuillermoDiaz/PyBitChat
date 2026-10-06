@@ -80,13 +80,35 @@ def es_nuestro_servicio(valor: object) -> bool:
     quedaba mudo y parecía que el teléfono había desaparecido. Comparar
     `UUID(...)` normaliza ambos formatos y hace la pregunta correcta.
 
+    ## Y por qué se aceptan **los dos** UUID
+
+    El de testnet se diferencia **en un único carácter**, el último:
+
+    ```
+    principal  F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C
+    testnet    F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5A
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ iguales hasta aquí�
+                                                            ^ solo esto
+    ```
+
+    `SERVICE_UUID_TESTNET` estaba definido aquí desde el principio y **no lo
+    usaba nadie**: solo se aceptaba el principal. Un APK de testnet anuncia
+    `...4B5A`, el filtro pedía `...4B5C`, y el móvil estaba ahí anunciando a
+    todo el mundo menos a nosotros.
+
+    El síntoma era indistinguible del móvil apagado: cero candidatos desde
+    nuestro lado mientras `bluetoothctl` lo veía sin problema. Dos sesiones
+    enteras de diagnóstico sobre un teléfono que estaba delante y con la app
+    abierta. Lo resuelve con `smoke_ble --crudo`.
+
     `valor` llega de bleak como `str`, `UUID` o, en alguna versión, como bytes
     little-endian; por eso el `try` y no una aserción.
     """
     try:
-        return _uuid.UUID(str(valor)) == SERVICE_UUID
+        u = _uuid.UUID(str(valor))
     except (ValueError, AttributeError, TypeError):
         return False
+    return u == SERVICE_UUID or u == SERVICE_UUID_TESTNET
 
 #: Tamaño del campo de identidad de peer, en bytes. Reexportado de `types.py`
 #: para que quien use sólo el paquete `ble` no tenga que importar el protocolo.
